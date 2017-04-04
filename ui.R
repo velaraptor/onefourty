@@ -17,7 +17,7 @@ list_names=do.call(rbind.data.frame, lapply(final_list,function(x){x[[11]]}))
 list_names[,1]=as.character(list_names[,1])
 probs=do.call(cbind.data.frame, lapply(final_list,function(x){x[[9]]}))
 ui <- fluidPage(theme = shinytheme("readable"),
-	    navbarPage(title=HTML("TX Lege House Analysis"), id="nav",windowTitle="TX Lege House Analysis",
+	    navbarPage(title=HTML("OneFourty"), id="nav",windowTitle="OneFourty",
 	    	tabPanel("Bill Analysis",
 	    		div(class="outer",
         				tags$head(
