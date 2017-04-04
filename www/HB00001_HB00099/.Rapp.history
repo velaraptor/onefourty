@@ -1,0 +1,1720 @@
+ggplotly(overplot) %>% config(displayModeBar = F) %>% layout(showlegend = FALSE)
+require(plyr)
+hex_bin <- function(x, y, weight = NULL, var4 = NULL, width = NULL, height = NULL, #
+                    xbins = 20, ybins = 20, frequency.to.area = FALSE, na.rm = FALSE, #
+                    hmin = 0, hmax = 1, xlim = NULL, ylim = NULL, ...) {#
+  if(hmax > 1) warning("hmax > 1 is likely to result in some hexagon overplotting")#
+  cleaned <- clean_xy(x, y, weight, var4, xlim=xlim, ylim=ylim)#
+  if (is.null(xlim)) xlim <- range(cleaned$x)#
+  if (is.null(ylim)) ylim <- range(cleaned$y)#
+  if (is.null(width))  width  <- diff(xlim) / xbins#
+  if (is.null(height)) height <- diff(ylim) / ybins#
+  height <- height * sqrt(3)#
+  pos <- hex_pos(cleaned$x, cleaned$y, width, height)#
+  cleaned$x <- pos[,1]; cleaned$y <- pos[,2]#
+  # bin values by hexagon#
+  binned <- count(cleaned, c("x", "y"), "weight")#
+  var4_sum <- aggregate(cleaned$var4, by=list(cleaned$x, cleaned$y), FUN=mean)#
+  names(var4_sum) = c('x','y','var4')#
+  # cols must match order of binned#
+  binned$var4 <- var4_sum$var4[match(paste(binned$x, binned$y), paste(var4_sum$x, var4_sum$y))]#
+  # swap size/frequency variables to map respectively to colour/size#
+  names(binned) <- c('x','y','col','size')#
+  if(frequency.to.area) binned <- transform(binned, size=col, col=size)#
+  # 'freq' field now definitely maps to hex area#
+  if(!is.null(var4) & min(binned$size)<0) warning("size vector cannot include negative values")#
+  # scale size variable and min-max parameters from hexagon area to side#
+  binned$size = hex_side(binned$size)#
+  hmax_a = hex_side(hmax)/hex_side(1)#
+  hmin_a = hex_side(hmin)/hex_side(1)#
+  hrange = hmax_a - hmin_a#
+  # normalise and rescale to custom min-max parameters#
+  binned$size <- binned$size * hrange / max(binned$size) + hmin_a#
+  structure(#
+    binned,#
+    width = width,#
+    height = height,#
+    class = c("bin_hex", "data.frame")#
+  )#
+}#
+clean_xy <- function(x, y, weight=NULL, var4=NULL, na.rm=TRUE, xlim=NULL, ylim=NULL) {#
+  # If !na.rm, remove missing values with a warning.  #
+  # Otherwise just remove them#
+  missing <- !is.finite(x) | !is.finite(y)#
+  nmissing <- sum(missing)#
+  if (na.rm && nmissing > 0) {#
+    warning("Removing ", nmissing, " missing values")#
+  }#
+  # Check weights, and throw out missing values and zero-weight observations#
+  if (is.null(weight)) {#
+    weight <- rep.int(1, length(x))#
+  } else {#
+    weight[is.na(weight)] <- 0#
+  }#
+  # Check sizes, and throw out missing values and zero-weight observations#
+  if (is.null(var4)) {#
+    var4 <- rep.int(1, length(x))#
+  } else {#
+    var4[is.na(var4)] <- 0#
+  }#
+  ok <- !missing & weight > 0 & var4 > 0#
+  if (all(ok)) { data.frame(x = x, y = y, weight = weight, var4 = var4)#
+  } else {#
+    x <- x[ok]#
+    y <- y[ok]#
+    var4 <- var4[ok]#
+    weight <- weight[ok]#
+  }#
+  out <- data.frame(x = x, y = y, weight = weight, var4 = var4)#
+  if (is.null(xlim)) xlim <- range(out$x); if (is.null(ylim)) ylim <- range(out$y)#
+  out[out$x >= min(xlim) & out$x <= max(xlim) & out$y >= min(ylim) & out$y <= max(ylim),]#
+}#
+plot.bin_hex <- function(x, ...) {#
+  if (!require("scales")) {#
+    message("Scales package required for plotting 2d densities")#
+    return()#
+  }#
+  if(all(x$col == x$col[1])) { # no variation in colour variable#
+    col <- rep("black", nrow(x))#
+  } else col <- cscale(x$col, seq_gradient_pal(low = "grey70", high = "red"))#
+  hexes <- hex_coord(x=x$x, y=x$y, width=attr(x, "width"), height=attr(x, "height"), #
+                     size=x$size, ...)#
+  plot(hexes[,1], hexes[,2], type = "n", ...)#
+  polygon(hexes, col = col, border = NA)#
+}#
+# Binning algorithms are available for various lattices in dimensions 2-8#
+# (Conway and Sloane 1982). The following subroutine is a fast FORTRAN#
+# implementation of hexagonal binning. The key observation is that hexagon#
+# centers fall on two staggered lattices whose cells are rectangles. Presuming#
+# the long side of the rectangle is in the y direction, dividing the y#
+# coordinates by square root (3) [SQRT(3)] makes the cells square. Thus the#
+# algorithm uses two lattices with square cells. The first lattice has points#
+# at the integers with [0, 0] as the lower left value. The second lattice is#
+# shifted so that the lower left value is at [.5 , .5]. The x and y vectors#
+# are scaled into [0, SIZE] and [0, SIZE / SQRT(3)], respectively. SIZE#
+# determines the portions of the lattices that are used. For each data point,#
+# binning consists of finding one candidate lattice point from each lattice#
+# and then selecting the nearest of the two candidates.#
+#
+#' Find centre of closest hexagon.#
+#'#
+#' @param x numeric x position#
+#' @param y numeric y position#
+#' @param width of hexagon#
+#' @param height of hexagon#
+#' @return matrix giving position of closest hexagon center#
+#' @keywords internal#
+#' @export#
+#' @examples#
+#' x <- runif(1e4)#
+#' y <- runif(1e4)#
+#' res <- hex_pos(x, y, 0.5, 0.5)#
+#' plot(x, y, type = "n")#
+#' segments(x, y, res[, 1], res[, 2], col = "grey80")#
+#' points(unique(res), pch = 20, cex = 2)#
+hex_pos <- function(x, y, width, height) {#
+  height <- height / sqrt(3)#
+  minx <- min(x, na.rm = TRUE)#
+  miny <- min(y, na.rm = TRUE)#
+  # Scale to [0, nrows/ncols]#
+  sx <- (x - minx) / width#
+  sy <- (y - miny) / height#
+  # Find closest center: [0, 0] or [0.5, 0.5]?#
+  fx <- round(sx)#
+  fy <- round(sy)#
+  dist_0 <- 3 * (sx - fx)^2 + (sy - fy)^2#
+  dist_1 <- 3 * (sx - fx + 0.5)^2 + (sy - fy + 0.5)^2#
+  dist_2 <- 3 * (sx - fx + 0.5)^2 + (sy - fy - 0.5)^2#
+  dist_3 <- 3 * (sx - fx - 0.5)^2 + (sy - fy + 0.5)^2#
+  dist_4 <- 3 * (sx - fx - 0.5)^2 + (sy - fy - 0.5)^2#
+  dist_smallest <- pmin(dist_0, dist_1, dist_2, dist_3, dist_4)#
+  x_offset <- rep(0, length(x))#
+  x_offset[dist_smallest == dist_1] <- +0.5#
+  x_offset[dist_smallest == dist_2] <- +0.5#
+  x_offset[dist_smallest == dist_3] <- -0.5#
+  x_offset[dist_smallest == dist_4] <- -0.5#
+  y_offset <- rep(0, length(y))#
+  y_offset[dist_smallest == dist_1] <- +0.5#
+  y_offset[dist_smallest == dist_2] <- -0.5#
+  y_offset[dist_smallest == dist_3] <- +0.5#
+  y_offset[dist_smallest == dist_4] <- -0.5#
+  # Transform back to original coordinates#
+  cbind(x = (fx - x_offset) * width + minx, y = (fy - y_offset) * height + miny)  #
+}#
+#
+#' Generate hexagon coordinates.#
+#'#
+#' Long axis is horizontal. Edges clock-wise from far-left, separated by#
+#' row of missing values.#
+#'#
+#' @param x horizontal position of center#
+#' @param y vertical position of center#
+#' @param width hex width#
+#' @param height hex height#
+#' @export#
+#' @keywords internal#
+#' @return A two column matrix with 7 times as many rows as input.#
+#' @examples#
+#' x <- runif(1000)#
+#' y <- runif(1000)#
+#' res <- unique(hex_pos(x, y, 0.5, 0.5))#
+#' hexes <- hex_coord(res[, 1], res[, 2], 0.6, 0.5)#
+#' #
+#' hexes <- hex_coord(res[, 1], res[, 2], rnorm(1000,.5,.3), rnorm(1000,.5,.3))#
+#' #
+#' plot(hexes, type = "n")#
+#' polygon(hexes)#
+#' points(res)#
+hex_coord <- function(x, y, width, height, size = 1) {#
+  dx <- size * width / 6#
+  dy <- size * height / 2 / sqrt(3)#
+  hex_x <- rbind(x - 2 * dx, x - dx, x + dx, x + 2 * dx, x + dx, x - dx, NA)#
+  hex_y <- rbind(y, y + dy, y + dy, y, y - dy, y - dy, NA)#
+  cbind(as.vector(hex_x), as.vector(hex_y))#
+}#
+hex_coord_df <- function(x, y, width, height, size = 1) {#
+  # like hex_coord but returns a dataframe of vertices grouped by an id variable#
+  dx <- size * width / 6#
+  dy <- size * height / 2 / sqrt(3)#
+  hex_x <- rbind(x - 2 * dx, x - dx, x + dx, x + 2 * dx, x + dx, x - dx)#
+  hex_y <- rbind(y, y + dy, y + dy, y, y - dy, y - dy)#
+  id    <- rep(1:length(x), each=6)#
+  data.frame(cbind(x=as.vector(hex_x), y=as.vector(hex_y), id))#
+}#
+## Functions for calculating hexagon geometries#
+#
+# hexagon side from area#
+hex_side = function(area) sqrt(2 * area / (sqrt(3)*3))#
+#
+# hexagon area from side (not used)#
+hex_area = function(side) side^2 * sqrt(3) * 3/2#
+#
+# quick function for gg-plotting with 1 line (limited functionality)#
+qplothex = function(x, y, var4 = NULL, f.to.a = FALSE, ...){#
+  bin = hex_bin(x=x, y=y, var4=var4, frequency.to.area=f.to.a, ...)#
+  hexes = hex_coord_df(x=bin$x, y=bin$y, width=attr(bin, "width"), height=attr(bin, "height"), size=bin$size)#
+  hexes$col = rep(bin$col, each=6)#
+  ggplot(hexes, aes(x=x, y=y)) + geom_polygon(aes(fill=col, group=id))#
+}
+overplot=court+theme(legend.title = element_blank(),text=element_text(family="Avenir"),axis.title.x = element_text(hjust = 50,face="bold",size=7))+geom_hex(data= finalmissed,aes(x= missed_shot_loc_top,y= missed_shot_loc_left),binwidth=c(5, 5),alpha=.6)+ scale_fill_distiller(palette = "PuBuGn")+ guides(fill=FALSE) +xlab("Plot Made with HalfCourt Analytics")+geom_hex(data= final,aes(x= made_shots_loc_top,y= made_shot_loc_left),binwidth=c(5, 5),alpha=.6)
+ggplotly(overplot) %>% config(displayModeBar = F) %>% layout(showlegend = FALSE)
+overplot=court+theme(legend.title = element_blank(),text=element_text(family="Avenir"),axis.title.x = element_text(hjust = 50,face="bold",size=7))+geom_hex(data= finalmissed,aes(x= missed_shot_loc_top,y= missed_shot_loc_left),binwidth=c(5, 5),alpha=.6)+ scale_fill_distiller(palette = "PuBuGn")+ guides(fill=FALSE) +xlab("Plot Made with HalfCourt Analytics")+geom_hex(data= final,aes(x= made_shots_loc_top,y= made_shots_loc_left),binwidth=c(5, 5),alpha=.6)
+ggplotly(overplot) %>% config(displayModeBar = F) %>% layout(showlegend = FALSE)
+overplot=court+theme(legend.title = element_blank(),text=element_text(family="Avenir"),axis.title.x = element_text(hjust = 50,face="bold",size=7))+geom_hex(data= finalmissed,aes(x= missed_shot_loc_top,y= missed_shot_loc_left),binwidth=c(5, 5),alpha=.6)+ scale_fill_distiller(palette = "PuBuGn")+ guides(fill=FALSE) +xlab("Plot Made with HalfCourt Analytics")+geom_hex(data= final,aes(x= made_shots_loc_top,y= made_shots_loc_left),binwidth=c(5, 5),alpha=.1)
+ggplotly(overplot) %>% config(displayModeBar = F) %>% layout(showlegend = FALSE)
+overplot=court+theme(legend.title = element_blank(),text=element_text(family="Avenir"),axis.title.x = element_text(hjust = 50,face="bold",size=7))+geom_hex(data= finalmissed,aes(x= missed_shot_loc_top,y= missed_shot_loc_left),binwidth=c(5, 5),alpha=.1)+ scale_fill_distiller(palette = "PuBuGn")+ guides(fill=FALSE) +xlab("Plot Made with HalfCourt Analytics")+geom_hex(data= final,aes(x= made_shots_loc_top,y= made_shots_loc_left),binwidth=c(5, 5),alpha=.5)
+ggplotly(overplot) %>% config(displayModeBar = F) %>% layout(showlegend = FALSE)
+overplot=court+#
+theme(legend.title = element_blank(),text=element_text(family="Avenir"),axis.title.x = element_text(hjust = 50,face="bold",size=7))#
++ scale_fill_distiller(palette = "PuBuGn")#
++ guides(fill=FALSE) +xlab("Plot Made with HalfCourt Analytics")#
++plot(hex_bin(x=final$made_shots_loc_top,y=final$made_shots_loc_left,var4=finalmissed$finalmissed))
+overplot=court+theme(legend.title = element_blank(),text=element_text(family="Avenir"),axis.title.x = element_text(hjust = 50,face="bold",size=7))+ scale_fill_distiller(palette = "PuBuGn")+ guides(fill=FALSE) +xlab("Plot Made with HalfCourt Analytics")+plot(hex_bin(x=final$made_shots_loc_top,y=final$made_shots_loc_left,var4=finalmissed$finalmissed))
+ggplotly(overplot) %>% config(displayModeBar = F) %>% layout(showlegend = FALSE)
+overplot=court+theme(legend.title = element_blank(),text=element_text(family="Avenir"),axis.title.x = element_text(hjust = 50,face="bold",size=7))+geom_hex(data=final,aes(x= made_shots_loc_top,y= made_shots_loc_left),binwidth=c(5, 5),alpha=.6,geom="point")+ scale_fill_distiller(palette = "PuBuGn")+ guides(fill=FALSE) +xlab("Plot Made with HalfCourt Analytics")
+overplot=court+theme(legend.title = element_blank(),text=element_text(family="Avenir"),axis.title.x = element_text(hjust = 50,face="bold",size=7))+ stat_bin_hex(data=final,aes(x= made_shots_loc_top,y= made_shots_loc_left),binwidth=c(5, 5),alpha=.6,geom="point")+ scale_fill_distiller(palette = "PuBuGn")+ guides(fill=FALSE) +xlab("Plot Made with HalfCourt Analytics")
+ggplotly(overplot) %>% config(displayModeBar = F) %>% layout(showlegend = FALSE)
+overplot
+overplot=court+theme(legend.title = element_blank(),text=element_text(family="Avenir"),axis.title.x = element_text(hjust = 50,face="bold",size=7))+ geom_hex(data=final,aes(x= made_shots_loc_top,y= made_shots_loc_left),binwidth=c(5, 5),alpha=.6)+ scale_fill_distiller(palette = "PuBuGn")+ guides(fill=FALSE) +xlab("Plot Made with HalfCourt Analytics")
+overplot
+library(RPostgreSQL)#
+library(ggplot2)#
+library(ggthemes)#
+library(shiny)#
+library(plotly)#
+library(shinythemes)#
+library(grid)#
+library(jpeg)
+drv = dbDriver("PostgreSQL")
+connection = dbConnect(drv,#
+			  	port = "5432",#
+			  	host = "safeatxx.cnj4vinpaowc.us-west-2.rds.amazonaws.com",#
+			  	user = "superuser",#
+			  	dbname = "nba_games",#
+			  	password = "Tygafe4*")
+shot_query = dbGetQuery(connection, #
+				paste0("SELECT * FROM location",#
+					" JOIN game_info ON game_info.game_id=location.game_id JOIN #
+					player_information ON player_information.player_id = location.player_id", #
+					" WHERE location.player_id=6450"))
+miss_shot_query = dbGetQuery(connection,#
+					paste0("SELECT * FROM location_misses",#
+					" JOIN game_info ON game_info.game_id=location_misses.game_id JOIN player_information ON player_information.player_id = location_misses.player_id",#
+					" WHERE location_misses.player_id=6450"))
+dbDisconnect(connection)#
+			new_shot_query=subset(shot_query, made_shots_loc_left<51)#
+			away_shot_query =subset(shot_query, made_shots_loc_left>50)
+away_shot_query$made_shots_loc_left = 47 - ((47/50)*(away_shot_query$made_shots_loc_left-50))#
+			away_shot_query$made_shots_loc_top = -25 - ((away_shot_query$made_shots_loc_top-100)/2)#
+#
+			new_shot_query$made_shots_loc_top=(new_shot_query$made_shots_loc_top/2)-25#
+			new_shot_query$made_shots_loc_left=new_shot_query$made_shots_loc_left*(47/50)#
+			miss_new_shot_query=subset(miss_shot_query, missed_shot_loc_left<51)#
+			miss_away_shot_query =subset(miss_shot_query, missed_shot_loc_left>50)#
+#
+			miss_away_shot_query$missed_shot_loc_left = 47 - ((47/50)*(miss_away_shot_query$missed_shot_loc_left-50))#
+			miss_away_shot_query$missed_shot_loc_top = -25 - ((miss_away_shot_query$missed_shot_loc_top-100)/2)#
+#
+			miss_new_shot_query$missed_shot_loc_top=(miss_new_shot_query$missed_shot_loc_top/2)-25#
+			miss_new_shot_query$missed_shot_loc_left=miss_new_shot_query$missed_shot_loc_left*(47/50)#
+			final=rbind(away_shot_query, new_shot_query)#
+			finalmissed=rbind(miss_away_shot_query,miss_new_shot_query)
+head(final)
+final.hex <- hexbin::hexbin(final$made_shots_loc_top, final$made_shots_loc_left,#
+                           xbins = 30, IDs = TRUE)
+final.hex
+hexagons <- data.frame(hexbin::hcell2xy(final.hex),#
+                       cell = final.hex@cell,#
+                       count = final.hex@count)
+hexagons
+final$cell = final.hex@cID
+final$cell
+final
+final=rbind(away_shot_query, new_shot_query)#
+			finalmissed=rbind(miss_away_shot_query,miss_new_shot_query)
+final$shot_type="Make"#
+			finalmissed$shot_type="Miss"
+all_shots =rbind(final,finalmissed)
+names(final)
+names(finalmissed)
+names(finalmissed)[2]="made_shots_loc_top"#
+			names(finalmissed)[3]="made_shots_loc_left"#
+			all_shots =rbind(final,finalmissed)
+allshots.hex <- hexbin::hexbin(all_shots$made_shots_loc_top, all_shots$made_shots_loc_left,#
+                           xbins = 15, IDs = TRUE)
+hexagons <- data.frame(hexbin::hcell2xy(allshots.hex),#
+                       cell = allshots.hex@cell,#
+                       count = allshots.hex@count)
+hexagons
+allshots.hex <- hexbin::hexbin(all_shots$made_shots_loc_top, all_shots$made_shots_loc_left,#
+                           xbins = 10, IDs = TRUE)#
+			hexagons <- data.frame(hexbin::hcell2xy(allshots.hex),#
+                       cell = allshots.hex@cell,#
+                       count = allshots.hex@count)
+all_shots$cell = allshots.hex@cID
+all_shots
+allshots.hexagons <- all_shots %>%#
+    			filter(shot_type != "Miss") %>%#
+			    group_by(cell) %>%#
+			    summarise(makes = n()) %>%#
+			    ungroup() %>%#
+			    right_join(hexagons, by = "cell") %>%#
+			    select(cell, x, y, count, makes)
+library(plyr)
+allshots.hexagons <- all_shots %>%#
+    			filter(shot_type != "Miss") %>%#
+			    group_by(cell) %>%#
+			    summarise(makes = n()) %>%#
+			    ungroup() %>%#
+			    right_join(hexagons, by = "cell") %>%#
+			    select(cell, x, y, count, makes)
+library(dplyr)
+allshots.hexagons <- all_shots %>%#
+    			filter(shot_type != "Miss") %>%#
+			    group_by(cell) %>%#
+			    summarise(makes = n()) %>%#
+			    ungroup() %>%#
+			    right_join(hexagons, by = "cell") %>%#
+			    select(cell, x, y, count, makes)
+allshots.hexagons
+is.na(allshots.hexagons)
+is.na(allshots.hexagons$makes)
+is.na(allshots.hexagons$makes)<-0
+allshots.hexagons
+allshots.hexagons[is.na(allshots.hexagons$makes),]<-0
+allshots.hexagons
+allshots.hexagons <- all_shots %>%#
+    			filter(shot_type != "Miss") %>%#
+			    group_by(cell) %>%#
+			    summarise(makes = n()) %>%#
+			    ungroup() %>%#
+			    right_join(hexagons, by = "cell") %>%#
+			    select(cell, x, y, count, makes)
+allshots.hexagons
+allshots.hexagons[is.na(allshots.hexagons$makes),5]<-0
+allshots.hexagons
+allshots.hexagons$percentage = allshots.hexagons$makes/allshots.hexagons$count
+allshots.hexagons
+bg_color ="#000004"#
+circle_points = function(center = c(0, 0), radius = 1, npoints = 360) {#
+  angles = seq(0, 2 * pi, length.out = npoints)#
+  return(data.frame(x = center[1] + radius * cos(angles),#
+                    y = center[2] + radius * sin(angles)))#
+}#
+#
+theme_court = function(base_size = 16) {#
+  theme_bw(base_size) +#
+    theme(#
+      text = element_text(color = "#f0f0f0"),#
+      plot.background = element_rect(fill = bg_color, color = bg_color),#
+      panel.background = element_rect(fill = bg_color, color = bg_color),#
+      panel.grid = element_blank(),#
+      panel.border = element_blank(),#
+      axis.text = element_blank(),#
+      axis.title = element_blank(),#
+      axis.ticks.length = unit(0, "lines"),#
+      legend.background = element_rect(fill = bg_color, color = bg_color),#
+      legend.position = "bottom",#
+      legend.key = element_blank(),#
+      legend.text = element_text(size = rel(1.0))#
+    )#
+}#
+#
+width = 50#
+height = 94 / 2#
+key_height = 19#
+inner_key_width = 12#
+outer_key_width = 16#
+backboard_width = 6#
+backboard_offset = 4#
+neck_length = 0.5#
+hoop_radius = 0.75#
+hoop_center_y = backboard_offset + neck_length + hoop_radius#
+three_point_radius = 23.75#
+three_point_side_radius = 22#
+three_point_side_height = 14#
+#
+short_three_radius = 22#
+short_three_seasons = c("1994-95", "1995-96", "1996-97")#
+#
+court_points = data.frame(#
+  x = c(width / 2, width / 2, -width / 2, -width / 2, width / 2),#
+  y = c(height, 0, 0, height, height),#
+  desc = "perimeter"#
+)#
+#
+court_points = rbind(court_points , data.frame(#
+  x = c(outer_key_width / 2, outer_key_width / 2, -outer_key_width / 2, -outer_key_width / 2),#
+  y = c(0, key_height, key_height, 0),#
+  desc = "outer_key"#
+))#
+#
+court_points = rbind(court_points , data.frame(#
+  x = c(-backboard_width / 2, backboard_width / 2),#
+  y = c(backboard_offset, backboard_offset),#
+  desc = "backboard"#
+))#
+#
+court_points = rbind(court_points , data.frame(#
+  x = c(0, 0), y = c(backboard_offset, backboard_offset + neck_length), desc = "neck"#
+))#
+#
+foul_circle = circle_points(center = c(0, key_height), radius = inner_key_width / 2)#
+foul_circle_top = filter(foul_circle, y > key_height) %>% mutate(desc = "foul_circle_top")#
+foul_circle_bottom = filter(foul_circle, y < key_height) %>% mutate(desc = "foul_circle_bottom")#
+#
+hoop = circle_points(center = c(0, hoop_center_y), radius = hoop_radius) %>% mutate(desc = "hoop")#
+#
+restricted = circle_points(center = c(0, hoop_center_y), radius = 4) %>%#
+  filter(y >= hoop_center_y) %>%#
+  mutate(desc = "restricted")#
+#
+three_point_circle = circle_points(center = c(0, hoop_center_y), radius = three_point_radius) %>% filter(y >= three_point_side_height)#
+short_three_circle = circle_points(center = c(0, hoop_center_y), radius = short_three_radius) %>% filter(y >= hoop_center_y)#
+#
+three_point_line = data.frame(#
+  x = c(three_point_side_radius, three_point_side_radius, three_point_circle$x, -three_point_side_radius, -three_point_side_radius),#
+  y = c(0, three_point_side_height, three_point_circle$y, three_point_side_height, 0),#
+  desc = "three_point_line"#
+)#
+#
+short_three_line = data.frame(#
+  x = c(three_point_side_radius, three_point_side_radius, short_three_circle$x, -three_point_side_radius, -three_point_side_radius),#
+  y = c(0, hoop_center_y, short_three_circle$y, hoop_center_y, 0),#
+  desc = "short_three_line"#
+)#
+#
+court_without_three = rbind(court_points , foul_circle_top, foul_circle_bottom, hoop, restricted)#
+#
+court_points = rbind(court_without_three, three_point_line)#
+court_points = mutate(court_points , dash = (desc == "foul_circle_bottom"))#
+#
+short_three_court_points = rbind(court_without_three, short_three_line)#
+short_three_court_points = mutate(short_three_court_points , dash = (desc == "foul_circle_bottom"))#
+#
+court = ggplot() +#
+  geom_path(data = court_points,#
+            aes(x = x, y = y, group = desc, linetype = dash),#
+            color = "#999999") +#
+  scale_linetype_manual(values = c("solid", "longdash"), guide = FALSE) +#
+  coord_fixed(ylim = c(0, 35), xlim = c(-25, 25)) +#
+  theme_court(base_size = 22)#
+#
+short_three_court = ggplot() +#
+  geom_path(data = short_three_court_points,#
+            aes(x = x, y = y, group = desc, linetype = dash),#
+            color = "#999999") +#
+  scale_linetype_manual(values = c("solid", "longdash"), guide = FALSE) +#
+  coord_fixed(ylim = c(0, 35), xlim = c(-25, 25)) +#
+  theme_court(base_size = 22)
+overplot=court+theme(legend.title = element_blank(),text=element_text(family="Avenir"),axis.title.x = element_text(hjust = 50,face="bold",size=7))+geom_hex(data=allshots.hexagons,aes(x= x,y= y,fill=percentage),alpha=.6)+ scale_fill_distiller(palette = "PuBuGn")+ guides(fill=FALSE) +xlab("Plot Made with HalfCourt Analytics")
+overplot
+ggplotly(overplot) %>% config(displayModeBar = F) %>% layout(showlegend = FALSE)
+overplot=court+theme(legend.title = element_blank(),text=element_text(family="Avenir"),axis.title.x = element_text(hjust = 50,face="bold",size=7))+geom_hex(data=allshots.hexagons,aes(x= x,y= y,fill=percentage),colour = NA,alpha=.6)+ scale_fill_distiller(palette = "PuBuGn")+ guides(fill=FALSE) +xlab("Plot Made with HalfCourt Analytics")
+ggplotly(overplot) %>% config(displayModeBar = F) %>% layout(showlegend = FALSE)
+overplot=court+theme(legend.title = element_blank(),text=element_text(family="Avenir"),axis.title.x = element_text(hjust = 50,face="bold",size=7))+geom_hex(data=allshots.hexagons,aes(x= x,y= y,fill=percentage),colour = NA,alpha=.6)+ scale_fill_brewer(palette = "PuBuGn")+ guides(fill=FALSE) +xlab("Plot Made with HalfCourt Analytics")
+ggplotly(overplot) %>% config(displayModeBar = F) %>% layout(showlegend = FALSE)
+allshots.hexagons
+overplot
+overplot=court+theme(legend.title = element_blank(),axis.title.x = element_text(hjust = 50,face="bold",size=7))+geom_hex(data=allshots.hexagons,aes(x= x,y= y,fill=percentage),colour = NA,alpha=.6)+ scale_fill_brewer(palette = "PuBuGn")+ guides(fill=FALSE) +xlab("Plot Made with HalfCourt Analytics")
+overplot
+overplot=court+theme(legend.title = element_blank())+geom_hex(data=allshots.hexagons,aes(x= x,y= y,fill=percentage),colour = NA,alpha=.6)+ scale_fill_brewer(palette = "PuBuGn")+ guides(fill=FALSE) +xlab("Plot Made with HalfCourt Analytics")
+overplot
+overplot=court+theme(legend.title = element_blank(),text=element_text(family="Avenir"),axis.title.x = element_text(hjust = 50,face="bold",size=7))+geom_hex(data=allshots.hexagons,aes(x= x,y= y,fill=percentage),colour = NA,alpha=.6)+ scale_fill_distiller(palette = "PuBuGn")+ guides(fill=FALSE) +xlab("Plot Made with HalfCourt Analytics")
+overplot
+allshots.hexagons = allshots.hexagons %>%  #
+				mutate(percentage.level = cut(percentage, c(0, .1, .2, .3,#
+                                       .4, .5, .6,#
+                                       .7, .8,.9,1),#
+                             labels = c("<.1",".1-.2",".2-.3",".3-.4",".4-.5",".5-.6",".6-.7",".7-.8",".8-.9",".9-1")))
+allshots.hexagons
+allshots.hexagons = allshots.hexagons %>%  #
+				mutate(percentage.level = cut(percentage, c(-.1, .1, .2, .3,#
+                                       .4, .5, .6,#
+                                       .7, .8,.9,1),#
+                             labels = c("<.1",".1-.2",".2-.3",".3-.4",".4-.5",".5-.6",".6-.7",".7-.8",".8-.9",".9-1")))
+allshots.hexagons
+overplot=court+theme(legend.title = element_blank())+geom_hex(data=allshots.hexagons,aes(x= x,y= y,fill=percentage.level),colour = NA,alpha=.6)+ scale_fill_brewer(palette = "PuBuGn")+ guides(fill=FALSE) +xlab("Plot Made with HalfCourt Analytics")
+overplot
+allshots.hexagons = allshots.hexagons %>%  #
+				mutate(percentage.level = cut(percentage, c(-.1, .1, .2, .3,#
+                                       .4, .5, .6,#
+                                       .7, .8,1),#
+                             labels = c("<.1",".1-.2",".2-.3",".3-.4",".4-.5",".5-.6",".6-.7",".7-.8",".8-1")))
+overplot=court+theme(legend.title = element_blank())+geom_hex(data=allshots.hexagons,aes(x= x,y= y,fill=percentage.level),colour = NA,alpha=.6)+ scale_fill_brewer(palette = "PuBuGn")+ guides(fill=FALSE) +xlab("Plot Made with HalfCourt Analytics")
+overplot
+ggplotly(overplot) %>% config(displayModeBar = F) %>% layout(showlegend = FALSE)
+new_shot_query=subset(shot_query, made_shots_loc_left<51)#
+			away_shot_query =subset(shot_query, made_shots_loc_left>50)#
+#
+			away_shot_query$made_shots_loc_left = 47 - ((47/50)*(away_shot_query$made_shots_loc_left-50))#
+			away_shot_query$made_shots_loc_top = -25 - ((away_shot_query$made_shots_loc_top-100)/2)#
+#
+			new_shot_query$made_shots_loc_top=(new_shot_query$made_shots_loc_top/2)-25#
+			new_shot_query$made_shots_loc_left=new_shot_query$made_shots_loc_left*(47/50)#
+			miss_new_shot_query=subset(miss_shot_query, missed_shot_loc_left<51)#
+			miss_away_shot_query =subset(miss_shot_query, missed_shot_loc_left>50)#
+#
+			miss_away_shot_query$missed_shot_loc_left = 47 - ((47/50)*(miss_away_shot_query$missed_shot_loc_left-50))#
+			miss_away_shot_query$missed_shot_loc_top = -25 - ((miss_away_shot_query$missed_shot_loc_top-100)/2)#
+#
+			miss_new_shot_query$missed_shot_loc_top=(miss_new_shot_query$missed_shot_loc_top/2)-25#
+			miss_new_shot_query$missed_shot_loc_left=miss_new_shot_query$missed_shot_loc_left*(47/50)#
+			final=rbind(away_shot_query, new_shot_query)#
+			finalmissed=rbind(miss_away_shot_query,miss_new_shot_query)#
+#
+			final$shot_type="Make"#
+			finalmissed$shot_type="Miss"#
+			names(finalmissed)[2]="made_shots_loc_top"#
+			names(finalmissed)[3]="made_shots_loc_left"#
+			all_shots =rbind(final,finalmissed)
+allshots.hex <- hexbin::hexbin(all_shots$made_shots_loc_top, all_shots$made_shots_loc_left,#
+                           xbins = 10, IDs = TRUE)#
+			hexagons <- data.frame(hexbin::hcell2xy(allshots.hex),#
+                       cell = allshots.hex@cell,#
+                       count = allshots.hex@count)#
+			all_shots$cell = allshots.hex@cID#
+			allshots.hexagons <- all_shots %>%#
+    			filter(shot_type != "Miss") %>%#
+			    group_by(cell) %>%#
+			    summarise(makes = n()) %>%#
+			    ungroup() %>%#
+			    right_join(hexagons, by = "cell") %>%#
+			    select(cell, x, y, count, makes)#
+			allshots.hexagons[is.na(allshots.hexagons$makes),5]<-0#
+			allshots.hexagons$percentage = allshots.hexagons$makes/allshots.hexagons$count#
+#
+			allshots.hexagons = allshots.hexagons %>%  #
+				mutate(percentage.level = cut(percentage, c(-.1, .1, .2, .3,#
+                                       .4, .5, .6,#
+                                       .7, .8,1),#
+                             labels = c("<.1",".1-.2",".2-.3",".3-.4",".4-.5",".5-.6",".6-.7",".7-.8",".8-1")))
+overplot=court+theme(legend.title = element_blank())+geom_hex(data=allshots.hexagons,aes(x= x,y= y,fill=percentage.level),colour = NA,alpha=.6)+ scale_fill_brewer(palette = "PuBuGn")+ guides(fill=FALSE) +xlab("Plot Made with HalfCourt Analytics")
+ggplotly(overplot) %>% config(displayModeBar = F) %>% layout(showlegend = FALSE)
+overplot
+overplot=court+theme(legend.title = element_blank())+geom_hex(data=allshots.hexagons,aes(x= x,y= y,fill=percentage.level),colour = NA,stat = "identity",alpha=.6)+ scale_fill_brewer(palette = "PuBuGn")+ guides(fill=FALSE) +xlab("Plot Made with HalfCourt Analytics")
+overplot
+ggplotly(overplot) %>% config(displayModeBar = F) %>% layout(showlegend = FALSE)
+ggplotly(overplot) %>% config(displayModeBar = F)
+allshots.hexagons
+allshots.hexagons$makes
+allshots.hexagons
+allshots.hexagons[1:78,]
+allshots.hexagons[1:20,]
+allshots.hexagons[1:30,]
+allshots.hexagons[20:30,]
+scale_fill_brewer
+scale_fill_brewer()
+? scale_fill_brewer()
+library(RPostgreSQL)#
+library(ggplot2)#
+library(ggthemes)#
+library(shiny)#
+library(plotly)#
+library(shinythemes)#
+library(grid)#
+library(jpeg)#
+library(dplyr)
+drv = dbDriver("PostgreSQL")
+connection = dbConnect(drv,#
+			  	port = "5432",#
+			  	host = "safeatxx.cnj4vinpaowc.us-west-2.rds.amazonaws.com",#
+			  	user = "superuser",#
+			  	dbname = "nba_games",#
+			  	password = "Tygafe4*")
+shot_query = dbGetQuery(connection, #
+				paste0("SELECT * FROM location",#
+					" JOIN game_info ON game_info.game_id=location.game_id JOIN #
+					player_information ON player_information.player_id = location.player_id", #
+					" WHERE location.player_id=6450"))
+names(shot_query)
+shot_query
+library(XML)#
+library(MASS)#
+library(RPostgreSQL)#
+library(rvest)#
+#
+get_game_data = function(games){#
+	game_id = games$game_id#
+	for(i in 1:length(game_id) ){#
+		game_date = read_html(paste0("http://www.espn.com/nba/game?gameId=",game_id[i]))#
+		team=game_date %>% html_nodes(xpath ='//*[contains(concat( " ", @class, " " ), concat( " ", "short-name", " " ))]') %>% html_text()#
+		team=team[1:2]#
+		date=game_date %>% html_nodes(xpath ='//*[@id="gamepackage-game-information"]/article/div/div[1]/div/div[1]/span') %>% html_attr("data-date")#
+		date=gsub("T.+","",date)#
+		home_away = c("A","H")#
+		game_info=as.data.frame(cbind(game_id[i],team,home_away,date))#
+		names(game_info)[1]="game_id"#
+		game_info$game_id = as.character(game_info$game_id)#
+		game_info$date = as.character(game_info$date)#
+		game_info$game_id = as.numeric(game_info$game_id)#
+		game_info$date = as.Date(game_info$date)-1#
+		if(i == 1){#
+				drv = dbDriver("PostgreSQL")#
+					connection = dbConnect(drv,#
+			  		port = "5432",#
+			  		host = "safeatxx.cnj4vinpaowc.us-west-2.rds.amazonaws.com",#
+			  		user = "superuser",#
+			  		dbname = "nba_games",#
+			  		password = "Tygafe4*")#
+			  	dbWriteTable(connection, "game_info", value=game_info,append=TRUE,row.names=FALSE)#
+				dbDisconnect(connection)#
+#
+			}#
+			else{#
+				drv = dbDriver("PostgreSQL")#
+				connection = dbConnect(drv,#
+			  		port = "5432",#
+			  		host = "safeatxx.cnj4vinpaowc.us-west-2.rds.amazonaws.com",#
+			  		user = "superuser",#
+			  		dbname = "nba_games",#
+			  		password = "Tygafe4*")#
+				dbWriteTable(connection, "game_info", value=game_info,append=TRUE,row.names=FALSE)#
+				dbDisconnect(connection)#
+			}#
+	}#
+}#
+##get play by play data for each game#
+upload_game_data_to_db = function(games){#
+	game_id = games$game_id#
+	for(i in 1:length(game_id)){#
+		play_by_play = readHTMLTable(paste0("http://www.espn.com/nba/playbyplay?gameId=",game_id[i]))#
+		if(length(play_by_play)<5){#
+			print(paste0(game_id[i], " : Game Hasnt Happened"))#
+		}#
+		else{#
+			print(paste0(game_id[i]," : GAME HAS HAPPEN"))#
+			play_by_play[[2]]$quarter = 1#
+			play_by_play[[3]]$quarter = 2#
+			play_by_play[[4]]$quarter = 3#
+			play_by_play[[5]]$quarter = 4#
+			play_by_play = rbind(play_by_play[[2]],play_by_play[[3]],play_by_play[[4]],play_by_play[[5]])#
+			play_by_play = play_by_play[-grep("time",play_by_play[,1]),]#
+#
+			play_by_play = cbind(play_by_play,game_id[i])#
+			play_by_play = as.data.frame(play_by_play)#
+			names(play_by_play) = c("time_game","team","play_detail","score","nada","quarter","game_id")#
+			play_by_play$quarter = as.character(play_by_play$quarter)#
+			play_by_play$game_id = as.character(play_by_play$game_id)#
+			play_by_play$quarter = as.numeric(play_by_play$quarter)#
+			play_by_play$game_id = as.numeric(play_by_play$game_id)#
+#
+			shot_chart = read_html(paste0("http://www.espn.com/nba/playbyplay?gameId=",game_id[i]))#
+			##get missed data #
+#
+			made_shots_text = shot_chart %>% html_nodes(xpath ='//*[contains(concat( " ", @class, " " ), concat( " ", "made", " " ))]') %>% html_attr("data-text")#
+			made_shots_loc = shot_chart %>% html_nodes(xpath ='//*[contains(concat( " ", @class, " " ), concat( " ", "made", " " ))]') %>% html_attr("style")#
+			player_id = shot_chart %>% html_nodes(xpath ='//*[contains(concat( " ", @class, " " ), concat( " ", "made", " " ))]') %>% html_attr("data-shooter")#
+			quarter_shot = shot_chart %>% html_nodes(xpath ='//*[contains(concat( " ", @class, " " ), concat( " ", "made", " " ))]') %>% html_attr("data-period")#
+			made_shots_loc_top = sub(".*top:", "", made_shots_loc)#
+			made_shots_loc_left = sub(".*left:", "", made_shots_loc)#
+#
+			made_shots_loc_top = gsub("%;","",made_shots_loc_top)#
+			made_shots_loc_left = gsub("%.*","",made_shots_loc_left)#
+#
+			location_makes=cbind(made_shots_text,made_shots_loc_top,made_shots_loc_left,player_id,quarter_shot,game_id[i])#
+			location_makes = as.data.frame(location_makes)#
+			names(location_makes)[6]="game_id"#
+			location_makes$made_shots_loc_top =as.character(location_makes$made_shots_loc_top)#
+			location_makes$made_shots_loc_left =as.character(location_makes$made_shots_loc_left)#
+			location_makes$player_id =as.character(location_makes$player_id)#
+			location_makes$quarter_shot =as.character(location_makes$quarter_shot)#
+			location_makes$game_id =as.character(location_makes$game_id)#
+			location_makes$made_shots_loc_top =as.numeric(location_makes$made_shots_loc_top)#
+			location_makes$made_shots_loc_left =as.numeric(location_makes$made_shots_loc_left)#
+			location_makes$player_id =as.numeric(location_makes$player_id)#
+			location_makes$quarter_shot =as.numeric(location_makes$quarter_shot)#
+			location_makes$game_id =as.numeric(location_makes$game_id)#
+#
+			if(i == 1){#
+				drv = dbDriver("PostgreSQL")#
+					connection = dbConnect(drv,#
+			  		port = "5432",#
+			  		host = "safeatxx.cnj4vinpaowc.us-west-2.rds.amazonaws.com",#
+			  		user = "superuser",#
+			  		dbname = "nba_games",#
+			  		password = "Tygafe4*")#
+			  	dbWriteTable(connection, "location", value=location_makes,append=TRUE,row.names=FALSE)#
+				dbWriteTable(connection, "play_by_play", value=play_by_play,append=TRUE,row.names=FALSE)#
+				dbDisconnect(connection)#
+#
+			}#
+			else{#
+				drv = dbDriver("PostgreSQL")#
+				connection = dbConnect(drv,#
+			  		port = "5432",#
+			  		host = "safeatxx.cnj4vinpaowc.us-west-2.rds.amazonaws.com",#
+			  		user = "superuser",#
+			  		dbname = "nba_games",#
+			  		password = "Tygafe4*")#
+				dbWriteTable(connection, "location", value=location_makes,append=TRUE,row.names=FALSE)#
+				dbWriteTable(connection, "play_by_play", value=play_by_play,append=TRUE,row.names=FALSE)#
+				dbDisconnect(connection)#
+			}#
+		}#
+	}#
+}#
+get_player_info =function(images){#
+	image_id=images$id#
+	for(i in 1:length(image_id)){#
+		player_info = read_html(paste0("http://www.espn.com/nba/player/_/id/",image_id[i]))#
+		player_team = player_info %>% html_nodes(xpath='//*[@id="content"]/div[3]/div[2]/div[3]/ul[1]/li[3]/a') %>% html_text()#
+		if(length(player_team)==0){#
+			player_team = "None"#
+		}#
+		player_information = as.data.frame(cbind(image_id[i],player_team,as.character(images$player[i])))#
+		names(player_information)=c("player_id","player_team","player_name")#
+		player_information$player_id = as.character(player_information$player_id)#
+		player_information$player_name = as.character(player_information$player_name)#
+		player_information$player_id = as.numeric(player_information$player_id)#
+		if(i == 1){#
+			drv = dbDriver("PostgreSQL")#
+				connection = dbConnect(drv,#
+		  		port = "5432",#
+		  		host = "safeatxx.cnj4vinpaowc.us-west-2.rds.amazonaws.com",#
+		  		user = "superuser",#
+		  		dbname = "nba_games",#
+		  		password = "Tygafe4*")#
+		  	dbWriteTable(connection, "player_information", value=player_information,row.names=FALSE)#
+			dbDisconnect(connection)#
+#
+		}#
+		else{#
+			drv = dbDriver("PostgreSQL")#
+			connection = dbConnect(drv,#
+		  		port = "5432",#
+		  		host = "safeatxx.cnj4vinpaowc.us-west-2.rds.amazonaws.com",#
+		  		user = "superuser",#
+		  		dbname = "nba_games",#
+		  		password = "Tygafe4*")#
+			dbWriteTable(connection, "player_information", value=player_information,append=TRUE,row.names=FALSE)#
+			dbDisconnect(connection)#
+		}#
+	}#
+}#
+#
+upload_misses_to_db = function(games){#
+	game_id = games$game_id#
+	for(i in 1:length(game_id)){#
+		play_by_play = readHTMLTable(paste0("http://www.espn.com/nba/playbyplay?gameId=",game_id[i]))#
+		if(length(play_by_play)<5){#
+			print(paste0(game_id[i], " : Game Hasnt Happened"))#
+		}#
+		else{#
+			print(paste0(game_id[i]," : GAME HAS HAPPEN"))#
+#
+			shot_chart = read_html(paste0("http://www.espn.com/nba/playbyplay?gameId=",game_id[i]))#
+			##get missed data #
+#
+			made_shots_text = shot_chart %>% html_nodes(xpath ='//*[contains(concat( " ", @class, " " ), concat( " ", "missed", " " ))]') %>% html_attr("data-text")#
+			made_shots_loc = shot_chart %>% html_nodes(xpath ='//*[contains(concat( " ", @class, " " ), concat( " ", "missed", " " ))]') %>% html_attr("style")#
+			player_id = shot_chart %>% html_nodes(xpath ='//*[contains(concat( " ", @class, " " ), concat( " ", "missed", " " ))]') %>% html_attr("data-shooter")#
+			quarter_shot = shot_chart %>% html_nodes(xpath ='//*[contains(concat( " ", @class, " " ), concat( " ", "missed", " " ))]') %>% html_attr("data-period")#
+			missed_shot_loc_top = sub(".*top:", "", made_shots_loc)#
+			missed_shot_loc_left = sub(".*left:", "", made_shots_loc)#
+#
+			missed_shot_loc_top = gsub("%;","",missed_shot_loc_top)#
+			missed_shot_loc_left = gsub("%.*","",missed_shot_loc_left)#
+#
+			location_misses=cbind(made_shots_text,missed_shot_loc_top,missed_shot_loc_left,player_id,quarter_shot,game_id[i])#
+			location_misses = as.data.frame(location_misses)#
+			names(location_misses)[6]="game_id"#
+			location_misses$missed_shot_loc_top =as.character(location_misses$missed_shot_loc_top)#
+			location_misses$missed_shot_loc_left =as.character(location_misses$missed_shot_loc_left)#
+			location_misses$player_id =as.character(location_misses$player_id)#
+			location_misses$quarter_shot =as.character(location_misses$quarter_shot)#
+			location_misses$game_id =as.character(location_misses$game_id)#
+			location_misses$missed_shot_loc_top =as.numeric(location_misses$missed_shot_loc_top)#
+			location_misses$missed_shot_loc_left =as.numeric(location_misses$missed_shot_loc_left)#
+			location_misses$player_id =as.numeric(location_misses$player_id)#
+			location_misses$quarter_shot =as.numeric(location_misses$quarter_shot)#
+			location_misses$game_id =as.numeric(location_misses$game_id)#
+#
+			if(i == 1){#
+				drv = dbDriver("PostgreSQL")#
+					connection = dbConnect(drv,#
+			  		port = "5432",#
+			  		host = "safeatxx.cnj4vinpaowc.us-west-2.rds.amazonaws.com",#
+			  		user = "superuser",#
+			  		dbname = "nba_games",#
+			  		password = "Tygafe4*")#
+			  	dbWriteTable(connection, "location_misses", value=location_misses,append=TRUE,row.names=FALSE)#
+				dbDisconnect(connection)#
+#
+			}#
+			else{#
+				drv = dbDriver("PostgreSQL")#
+				connection = dbConnect(drv,#
+			  		port = "5432",#
+			  		host = "safeatxx.cnj4vinpaowc.us-west-2.rds.amazonaws.com",#
+			  		user = "superuser",#
+			  		dbname = "nba_games",#
+			  		password = "Tygafe4*")#
+				dbWriteTable(connection, "location_misses", value=location_misses,append=TRUE,row.names=FALSE)#
+				dbDisconnect(connection)#
+			}#
+		}#
+	}#
+}
+drv = dbDriver("PostgreSQL")#
+connection = dbConnect(drv,#
+			  	port = "5432",#
+			  	host = "safeatxx.cnj4vinpaowc.us-west-2.rds.amazonaws.com",#
+			  	user = "superuser",#
+			  	dbname = "nba_games",#
+			  	password = "Tygafe4*")#
+unique_games=dbGetQuery(connection, "SELECT DISTINCT game_id FROM location ")#
+unique_players=dbGetQuery(connection, "SELECT DISTINCT player_id FROM player_information")#
+unique_games_2 = dbGetQuery(connection,"SELECT DISTINCT game_id FROM game_info")#
+Sys.Date()
+games_already_not_game_data= dbGetQuery(connection, paste0("SELECT game_info.game_id,game_info.date FROM game_info #
+LEFT JOIN location ON location.game_id=game_info.game_id WHERE location.game_id IS NULL #
+AND game_info.date <='",Sys.Date()-1,"' GROUP BY game_info.game_id,game_info.date ORDER BY game_info.date"))
+games_already_not_game_data
+uniques=subset(unique_games,(game_id %in% unique_games_2$game_id))#
+dbDisconnect(connection)
+uniques
+full_games_clean = full_games[!duplicated(full_games[,1]),]#
+full_games_clean = as.data.frame(full_games_clean)#
+full_games_clean = full_games_clean[-grep("http",full_games_clean[,1]),]#
+full_games_clean = as.data.frame(full_games_clean)#
+names(full_games_clean) = "game_id"#
+full_games_clean$game_id = as.character(full_games_clean$game_id)#
+full_games_clean = as.data.frame(full_games_clean)#
+full_games_clean = subset(full_games_clean, !(game_id %in% uniques$game_id))
+full_games = data.frame(games=(character()))#
+days = seq(as.Date('2017-02-04'),as.Date(Sys.Date()),by='day')#
+for(i in seq_along(days)){#
+	date=format(days[i],format="%Y%m%d")#
+	games = read_html(paste0("http://www.espn.com/nba/schedule/_/date/",date))#
+	games = games %>% html_nodes(xpath="//td/a") %>% html_attr("href")#
+	games = as.data.frame(games)#
+	games[,1] = as.character(games[,1])#
+	games = games[grep("gameId",games[,1]),]#
+	games = gsub("\\/nba\\/game\\?gameId=","",games)#
+	games = as.data.frame(games)#
+	games[,1] = as.character(games[,1])#
+	full_games = rbind(games,full_games)#
+}#
+full_games_clean = full_games[!duplicated(full_games[,1]),]#
+full_games_clean = as.data.frame(full_games_clean)#
+full_games_clean = full_games_clean[-grep("http",full_games_clean[,1]),]#
+full_games_clean = as.data.frame(full_games_clean)#
+names(full_games_clean) = "game_id"#
+full_games_clean$game_id = as.character(full_games_clean$game_id)#
+full_games_clean = as.data.frame(full_games_clean)#
+full_games_clean = subset(full_games_clean, !(game_id %in% uniques$game_id))
+full_games_clean
+upload_new_games = subset(full_games_clean,!(game_id %in%games_already_not_game_data$game_id))
+upload_game_data_to_db(full_games_clean)
+drv = dbDriver("PostgreSQL")#
+connection = dbConnect(drv,#
+			  	port = "5432",#
+			  	host = "safeatxx.cnj4vinpaowc.us-west-2.rds.amazonaws.com",#
+			  	user = "superuser",#
+			  	dbname = "nba_games",#
+			  	password = "Tygafe4*")
+games_already_not_game_data_miss= dbGetQuery(connection, paste0("SELECT game_info.game_id,game_info.date FROM game_info #
+LEFT JOIN location_misses ON location_misses.game_id=game_info.game_id WHERE location_misses.game_id IS NULL #
+AND game_info.date <='",Sys.Date()-1,"' GROUP BY game_info.game_id,game_info.date ORDER BY game_info.date"))
+games_already_not_game_data_miss
+full_games_clean
+upload_misses_to_db(games_already_not_game_data_miss)
+library(XML)#
+library(MASS)#
+library(RPostgreSQL)#
+library(rvest)#
+#
+get_game_data = function(games){#
+	game_id = games$game_id#
+	for(i in 1:length(game_id) ){#
+		game_date = read_html(paste0("http://www.espn.com/nba/game?gameId=",game_id[i]))#
+		team=game_date %>% html_nodes(xpath ='//*[contains(concat( " ", @class, " " ), concat( " ", "short-name", " " ))]') %>% html_text()#
+		team=team[1:2]#
+		date=game_date %>% html_nodes(xpath ='//*[@id="gamepackage-game-information"]/article/div/div[1]/div/div[1]/span') %>% html_attr("data-date")#
+		date=gsub("T.+","",date)#
+		home_away = c("A","H")#
+		game_info=as.data.frame(cbind(game_id[i],team,home_away,date))#
+		names(game_info)[1]="game_id"#
+		game_info$game_id = as.character(game_info$game_id)#
+		game_info$date = as.character(game_info$date)#
+		game_info$game_id = as.numeric(game_info$game_id)#
+		game_info$date = as.Date(game_info$date)-1#
+		if(i == 1){#
+				drv = dbDriver("PostgreSQL")#
+					connection = dbConnect(drv,#
+			  		port = "5432",#
+			  		host = "safeatxx.cnj4vinpaowc.us-west-2.rds.amazonaws.com",#
+			  		user = "superuser",#
+			  		dbname = "nba_games",#
+			  		password = "Tygafe4*")#
+			  	dbWriteTable(connection, "game_info", value=game_info,append=TRUE,row.names=FALSE)#
+				dbDisconnect(connection)#
+#
+			}#
+			else{#
+				drv = dbDriver("PostgreSQL")#
+				connection = dbConnect(drv,#
+			  		port = "5432",#
+			  		host = "safeatxx.cnj4vinpaowc.us-west-2.rds.amazonaws.com",#
+			  		user = "superuser",#
+			  		dbname = "nba_games",#
+			  		password = "Tygafe4*")#
+				dbWriteTable(connection, "game_info", value=game_info,append=TRUE,row.names=FALSE)#
+				dbDisconnect(connection)#
+			}#
+	}#
+}#
+##get play by play data for each game#
+upload_game_data_to_db = function(games){#
+	game_id = games$game_id#
+	for(i in 1:length(game_id)){#
+		play_by_play = readHTMLTable(paste0("http://www.espn.com/nba/playbyplay?gameId=",game_id[i]))#
+		if(length(play_by_play)<5){#
+			print(paste0(game_id[i], " : Game Hasnt Happened"))#
+		}#
+		else{#
+			print(paste0(game_id[i]," : GAME HAS HAPPEN"))#
+			play_by_play[[2]]$quarter = 1#
+			play_by_play[[3]]$quarter = 2#
+			play_by_play[[4]]$quarter = 3#
+			play_by_play[[5]]$quarter = 4#
+			play_by_play = rbind(play_by_play[[2]],play_by_play[[3]],play_by_play[[4]],play_by_play[[5]])#
+			play_by_play = play_by_play[-grep("time",play_by_play[,1]),]#
+#
+			play_by_play = cbind(play_by_play,game_id[i])#
+			play_by_play = as.data.frame(play_by_play)#
+			names(play_by_play) = c("time_game","team","play_detail","score","nada","quarter","game_id")#
+			play_by_play$quarter = as.character(play_by_play$quarter)#
+			play_by_play$game_id = as.character(play_by_play$game_id)#
+			play_by_play$quarter = as.numeric(play_by_play$quarter)#
+			play_by_play$game_id = as.numeric(play_by_play$game_id)#
+#
+			shot_chart = read_html(paste0("http://www.espn.com/nba/playbyplay?gameId=",game_id[i]))#
+			##get missed data #
+#
+			made_shots_text = shot_chart %>% html_nodes(xpath ='//*[contains(concat( " ", @class, " " ), concat( " ", "made", " " ))]') %>% html_attr("data-text")#
+			made_shots_loc = shot_chart %>% html_nodes(xpath ='//*[contains(concat( " ", @class, " " ), concat( " ", "made", " " ))]') %>% html_attr("style")#
+			player_id = shot_chart %>% html_nodes(xpath ='//*[contains(concat( " ", @class, " " ), concat( " ", "made", " " ))]') %>% html_attr("data-shooter")#
+			quarter_shot = shot_chart %>% html_nodes(xpath ='//*[contains(concat( " ", @class, " " ), concat( " ", "made", " " ))]') %>% html_attr("data-period")#
+			made_shots_loc_top = sub(".*top:", "", made_shots_loc)#
+			made_shots_loc_left = sub(".*left:", "", made_shots_loc)#
+#
+			made_shots_loc_top = gsub("%;","",made_shots_loc_top)#
+			made_shots_loc_left = gsub("%.*","",made_shots_loc_left)#
+#
+			location_makes=cbind(made_shots_text,made_shots_loc_top,made_shots_loc_left,player_id,quarter_shot,game_id[i])#
+			location_makes = as.data.frame(location_makes)#
+			names(location_makes)[6]="game_id"#
+			location_makes$made_shots_loc_top =as.character(location_makes$made_shots_loc_top)#
+			location_makes$made_shots_loc_left =as.character(location_makes$made_shots_loc_left)#
+			location_makes$player_id =as.character(location_makes$player_id)#
+			location_makes$quarter_shot =as.character(location_makes$quarter_shot)#
+			location_makes$game_id =as.character(location_makes$game_id)#
+			location_makes$made_shots_loc_top =as.numeric(location_makes$made_shots_loc_top)#
+			location_makes$made_shots_loc_left =as.numeric(location_makes$made_shots_loc_left)#
+			location_makes$player_id =as.numeric(location_makes$player_id)#
+			location_makes$quarter_shot =as.numeric(location_makes$quarter_shot)#
+			location_makes$game_id =as.numeric(location_makes$game_id)#
+#
+			if(i == 1){#
+				drv = dbDriver("PostgreSQL")#
+					connection = dbConnect(drv,#
+			  		port = "5432",#
+			  		host = "safeatxx.cnj4vinpaowc.us-west-2.rds.amazonaws.com",#
+			  		user = "superuser",#
+			  		dbname = "nba_games",#
+			  		password = "Tygafe4*")#
+			  	dbWriteTable(connection, "location", value=location_makes,append=TRUE,row.names=FALSE)#
+				dbWriteTable(connection, "play_by_play", value=play_by_play,append=TRUE,row.names=FALSE)#
+				dbDisconnect(connection)#
+#
+			}#
+			else{#
+				drv = dbDriver("PostgreSQL")#
+				connection = dbConnect(drv,#
+			  		port = "5432",#
+			  		host = "safeatxx.cnj4vinpaowc.us-west-2.rds.amazonaws.com",#
+			  		user = "superuser",#
+			  		dbname = "nba_games",#
+			  		password = "Tygafe4*")#
+				dbWriteTable(connection, "location", value=location_makes,append=TRUE,row.names=FALSE)#
+				dbWriteTable(connection, "play_by_play", value=play_by_play,append=TRUE,row.names=FALSE)#
+				dbDisconnect(connection)#
+			}#
+		}#
+	}#
+}#
+get_player_info =function(images){#
+	image_id=images$id#
+	for(i in 1:length(image_id)){#
+		player_info = read_html(paste0("http://www.espn.com/nba/player/_/id/",image_id[i]))#
+		player_team = player_info %>% html_nodes(xpath='//*[@id="content"]/div[3]/div[2]/div[3]/ul[1]/li[3]/a') %>% html_text()#
+		if(length(player_team)==0){#
+			player_team = "None"#
+		}#
+		player_information = as.data.frame(cbind(image_id[i],player_team,as.character(images$player[i])))#
+		names(player_information)=c("player_id","player_team","player_name")#
+		player_information$player_id = as.character(player_information$player_id)#
+		player_information$player_name = as.character(player_information$player_name)#
+		player_information$player_id = as.numeric(player_information$player_id)#
+		if(i == 1){#
+			drv = dbDriver("PostgreSQL")#
+				connection = dbConnect(drv,#
+		  		port = "5432",#
+		  		host = "safeatxx.cnj4vinpaowc.us-west-2.rds.amazonaws.com",#
+		  		user = "superuser",#
+		  		dbname = "nba_games",#
+		  		password = "Tygafe4*")#
+		  	dbWriteTable(connection, "player_information", value=player_information,row.names=FALSE)#
+			dbDisconnect(connection)#
+#
+		}#
+		else{#
+			drv = dbDriver("PostgreSQL")#
+			connection = dbConnect(drv,#
+		  		port = "5432",#
+		  		host = "safeatxx.cnj4vinpaowc.us-west-2.rds.amazonaws.com",#
+		  		user = "superuser",#
+		  		dbname = "nba_games",#
+		  		password = "Tygafe4*")#
+			dbWriteTable(connection, "player_information", value=player_information,append=TRUE,row.names=FALSE)#
+			dbDisconnect(connection)#
+		}#
+	}#
+}#
+#
+upload_misses_to_db = function(games){#
+	game_id = games$game_id#
+	for(i in 1:length(game_id)){#
+		play_by_play = readHTMLTable(paste0("http://www.espn.com/nba/playbyplay?gameId=",game_id[i]))#
+		if(length(play_by_play)<5){#
+			print(paste0(game_id[i], " : Game Hasnt Happened"))#
+		}#
+		else{#
+			print(paste0(game_id[i]," : GAME HAS HAPPEN"))#
+#
+			shot_chart = read_html(paste0("http://www.espn.com/nba/playbyplay?gameId=",game_id[i]))#
+			##get missed data #
+#
+			made_shots_text = shot_chart %>% html_nodes(xpath ='//*[contains(concat( " ", @class, " " ), concat( " ", "missed", " " ))]') %>% html_attr("data-text")#
+			made_shots_loc = shot_chart %>% html_nodes(xpath ='//*[contains(concat( " ", @class, " " ), concat( " ", "missed", " " ))]') %>% html_attr("style")#
+			player_id = shot_chart %>% html_nodes(xpath ='//*[contains(concat( " ", @class, " " ), concat( " ", "missed", " " ))]') %>% html_attr("data-shooter")#
+			quarter_shot = shot_chart %>% html_nodes(xpath ='//*[contains(concat( " ", @class, " " ), concat( " ", "missed", " " ))]') %>% html_attr("data-period")#
+			missed_shot_loc_top = sub(".*top:", "", made_shots_loc)#
+			missed_shot_loc_left = sub(".*left:", "", made_shots_loc)#
+#
+			missed_shot_loc_top = gsub("%;","",missed_shot_loc_top)#
+			missed_shot_loc_left = gsub("%.*","",missed_shot_loc_left)#
+#
+			location_misses=cbind(made_shots_text,missed_shot_loc_top,missed_shot_loc_left,player_id,quarter_shot,game_id[i])#
+			location_misses = as.data.frame(location_misses)#
+			names(location_misses)[6]="game_id"#
+			location_misses$missed_shot_loc_top =as.character(location_misses$missed_shot_loc_top)#
+			location_misses$missed_shot_loc_left =as.character(location_misses$missed_shot_loc_left)#
+			location_misses$player_id =as.character(location_misses$player_id)#
+			location_misses$quarter_shot =as.character(location_misses$quarter_shot)#
+			location_misses$game_id =as.character(location_misses$game_id)#
+			location_misses$missed_shot_loc_top =as.numeric(location_misses$missed_shot_loc_top)#
+			location_misses$missed_shot_loc_left =as.numeric(location_misses$missed_shot_loc_left)#
+			location_misses$player_id =as.numeric(location_misses$player_id)#
+			location_misses$quarter_shot =as.numeric(location_misses$quarter_shot)#
+			location_misses$game_id =as.numeric(location_misses$game_id)#
+#
+			if(i == 1){#
+				drv = dbDriver("PostgreSQL")#
+					connection = dbConnect(drv,#
+			  		port = "5432",#
+			  		host = "safeatxx.cnj4vinpaowc.us-west-2.rds.amazonaws.com",#
+			  		user = "superuser",#
+			  		dbname = "nba_games",#
+			  		password = "Tygafe4*")#
+			  	dbWriteTable(connection, "location_misses", value=location_misses,append=TRUE,row.names=FALSE)#
+				dbDisconnect(connection)#
+#
+			}#
+			else{#
+				drv = dbDriver("PostgreSQL")#
+				connection = dbConnect(drv,#
+			  		port = "5432",#
+			  		host = "safeatxx.cnj4vinpaowc.us-west-2.rds.amazonaws.com",#
+			  		user = "superuser",#
+			  		dbname = "nba_games",#
+			  		password = "Tygafe4*")#
+				dbWriteTable(connection, "location_misses", value=location_misses,append=TRUE,row.names=FALSE)#
+				dbDisconnect(connection)#
+			}#
+		}#
+	}#
+}
+drv = dbDriver("PostgreSQL")#
+connection = dbConnect(drv,#
+			  	port = "5432",#
+			  	host = "safeatxx.cnj4vinpaowc.us-west-2.rds.amazonaws.com",#
+			  	user = "superuser",#
+			  	dbname = "nba_games",#
+			  	password = "Tygafe4*")#
+unique_games=dbGetQuery(connection, "SELECT DISTINCT game_id FROM location ")#
+unique_players=dbGetQuery(connection, "SELECT DISTINCT player_id FROM player_information")#
+unique_games_2 = dbGetQuery(connection,"SELECT DISTINCT game_id FROM game_info")#
+Sys.Date()
+games_already_not_game_data= dbGetQuery(connection, paste0("SELECT game_info.game_id,game_info.date FROM game_info #
+LEFT JOIN location ON location.game_id=game_info.game_id WHERE location.game_id IS NULL #
+AND game_info.date <='",Sys.Date()-1,"' GROUP BY game_info.game_id,game_info.date ORDER BY game_info.date"))#
+#
+uniques=subset(unique_games,(game_id %in% unique_games_2$game_id))#
+dbDisconnect(connection)#
+#
+games_already_not_game_data_miss= dbGetQuery(connection, paste0("SELECT game_info.game_id,game_info.date FROM game_info #
+LEFT JOIN location_misses ON location_misses.game_id=game_info.game_id WHERE location_misses.game_id IS NULL #
+AND game_info.date <='",Sys.Date()-1,"' GROUP BY game_info.game_id,game_info.date ORDER BY game_info.date"))
+library(tm)#
+library(wordcloud)#
+library(e1071)#
+library(dplyr)#
+library(caret)#
+library(doMC)#
+library(xml2)#
+library(rvest)#
+#
+registerDoMC(cores=detectCores())#
+##look at subject, look at bill number, look at author party, author district number ,legislative party leader, party govenor, governor party agenda, seperate appropriation, once in another part of the process, check probability #
+#
+subjects_list=read.csv("~/Desktop/bill_analysis_r/subjects.csv")#
+#
+##http://www.lrl.state.tx.us/legeLeaders/members/partyListSession.cfm?leg=84#
+party_url="http://www.lrl.state.tx.us/legeLeaders/members/partyListSession.cfm?leg=84"#
+dems=party_url %>%#
+  read_html() %>%html_nodes(xpath="//table[@summary='Democrats']/tr[2]/td/a") %>% html_text()#
+repubs =party_url %>%#
+  read_html() %>%html_nodes(xpath="//table[@summary='Republicans']/tr[2]/td/a") %>% html_text()#
+##<U+00F1> = n #
+##<U+00E1> = a#
+##<U+00ED> = i#
+##<U+00E9> = e#
+repub_id=party_url %>%#
+  read_html() %>%html_nodes(xpath="//table[@summary='Republicans']/tr[2]/td/a") %>% html_attr("href")#
+dems_id = party_url %>%#
+  read_html() %>%html_nodes(xpath="//table[@summary='Democrats']/tr[2]/td/a") %>% html_attr("href")#
+#
+dems=cbind(dems_id,dems,"D")#
+repubs=cbind(repub_id,repubs,"R")#
+#
+all_legislators=rbind(dems,repubs)#
+all_legislators=as.data.frame(all_legislators)#
+names(all_legislators)=c("id","name","party")#
+all_legislators$id=gsub("memberDisplay.cfm\\?memberID=","",all_legislators$id)#
+all_legislators$id=as.numeric(all_legislators$id)#
+all_legislators$name=as.character(all_legislators$name)#
+#
+##district numbers#
+for(i in 1:nrow(all_legislators)){#
+	member_districts = paste0("http://www.lrl.state.tx.us/legeLeaders/members/memberDisplay.cfm?memberID=",all_legislators$id[i]) %>%#
+	read_html() %>%html_nodes(xpath='//table[2]/tr[2]/td/table') %>% html_table(header=T)#
+	member_districts[[1]]$Legislatures=gsub(" .*","",member_districts[[1]]$Legislatures)#
+	member_districts[[1]]$Legislatures=gsub("[A-z]+","",member_districts[[1]]$Legislatures)#
+	district_number=member_districts[[1]][member_districts[[1]]$Legislatures=="84",2]#
+	all_legislators[i,4]= district_number#
+}#
+names(all_legislators)[4]="district_number"#
+##if one name, get party affliation, if multiple check either bipartisian#
+transformations = function(corpus){#
+    corpus = tm_map(corpus, content_transformer(tolower))#
+    corpus = tm_map(corpus, removeWords, stopwords("english"))#
+    corpus = tm_map(corpus, removePunctuation)#
+    corpus = tm_map(corpus, removeNumbers)#
+    corpus = tm_map(corpus, removeWords, "a5")#
+    corpus = tm_map(corpus, removeWords, "a7")#
+    corpus = tm_map(corpus, removeWords, "")#
+    corpus = tm_map(corpus, stripWhitespace)#
+    corpus = tm_map(corpus, stemDocument,language="english")#
+    return(corpus)#
+}#
+#
+invisible(Sys.setlocale(locale = "C"))#
+setwd("Desktop/84 bills/ftp.legis.state.tx.us/bills/84R/billtext/pdf/house_bills/")#
+files = list.files(pattern = "pdf$",recursive = TRUE)#
+enrolled=files[grep("F",files)]#
+##f is enrolled #
+## i is introduced#
+introduced=files[grep("I",files)]#
+#
+int_xml = gsub("\\/HB0000","/HB ",introduced)#
+int_xml = gsub("\\/HB000","/HB ",int_xml)#
+int_xml = gsub("\\/HB00","/HB ",int_xml)#
+int_xml = gsub("\\/HB0","/HB ",int_xml)#
+int_xml = gsub("[A-z]\\.pdf",".xml",int_xml)#
+#
+final_list=list()#
+for(i in 1:length(int_xml)){#
+	data <- read_xml(paste0("/Users/christophvel/Desktop/84 bills/ftp.legis.state.tx.us/bills/84R/billhistory/house_bills/",int_xml[i]))#
+	subjects <- data %>% xml_find_all("//subject") %>%  xml_text()#
+	coauthors <- data %>% xml_find_all("//coauthors") %>%  xml_text()#
+	authors <- data %>% xml_find_all("//authors") %>%  xml_text()#
+	authors = strsplit(authors," | ",fixed=T)#
+	coauthors = strsplit(coauthors," | ",fixed=T)#
+	authors=as.data.frame(authors)#
+	coauthors=as.data.frame(coauthors)#
+	names(authors) = "names"#
+	names(coauthors) = "names"#
+	bill_info=list(int_xml[i],authors,coauthors,subjects)#
+	final_list[[int_xml[i]]]=bill_info#
+}#
+#
+df_total = data.frame()#
+#
+for(i in 1:length(final_list)){#
+	xtest=match(subjects_list[,1],final_list[[i]][[4]])#
+	xtest[is.na(xtest)]=0#
+	xtest[xtest>0]=1#
+	subjects=as.data.frame(t(xtest))#
+	df_total=rbind(df_total,subjects)#
+#
+}#
+for(i in 1:length(final_list)){#
+	final_list[[i]][[2]][,1]=as.character(final_list[[i]][[2]][,1])#
+	final_list[[i]][[2]][1,1] = gsub("\\\"Mando\\\"","Armando",final_list[[i]][[2]][1,1])#
+	final_list[[i]][[2]][1,1] = gsub("Allen","Allen, Alma",final_list[[i]][[2]][1,1])#
+	final_list[[i]][[2]][1,1] = gsub("\\\"Doc\\\"","'Doc'",final_list[[i]][[2]][1,1])#
+}#
+tester=lapply(final_list,function(x){as.character(x[[2]][1,])})#
+tester=as.data.frame(tester)#
+tester=t(tester)#
+x=strsplit(tester,", ")#
+all_legislators$name=gsub("Lucio, III","Lucio III",all_legislators$name)#
+all_legislators = rbind(all_legislators,c("NA","Bernal","D","NA"))#
+all_legislators = rbind(all_legislators,c("NA","Cyrier","R","NA"))#
+all_legislators = rbind(all_legislators,c("NA","Schubert","R","NA"))#
+df_party_total = data.frame()#
+for(i in 1:length(x)){#
+	party=all_legislators[grep(paste0(as.character(x[[i]][1]),"$"),all_legislators$name),3]#
+	if(length(party)>1){#
+		party=all_legislators[grep(as.character(x[[i]][2]),all_legislators$name),3]#
+		if(length(party)>1){#
+			party=all_legislators[grepl(as.character(x[[i]][1]),all_legislators$name) & grepl(as.character(x[[i]][2]),all_legislators$name),3] #
+		}#
+	}#
+	if(length(party)==0){#
+		party=all_legislators[grep(paste0(as.character(x[[i]][1])),all_legislators$name),3]#
+		if(length(party)==0){#
+			party="NA"#
+		}#
+	}#
+	party=as.character(party)#
+	df_party_total[i,1]=party#
+}#
+df_total=as.data.frame(df_total)#
+names(df_total)=as.character(subjects_list[,1])#
+names(df_party_total)="party_affliation"#
+##subjects, party affliation, if one party affliation, first name author, district number, need to append this to intro dataframe #
+#
+enrolledfile=gsub("HB[0-9]+\\_HB[0-9]+\\/","",enrolled)#
+enrollednumber=gsub("F.pdf","", enrolledfile)#
+#
+introducedfiles=gsub("HB[0-9]+\\_HB[0-9]+\\/","",introduced)#
+introducednumber=gsub("[A-z].pdf","", introducedfiles)#
+intro=as.data.frame(cbind(introduced,introducednumber))#
+#
+intro[(intro$introducednumber %in% enrollednumber),3]="E"#
+intro[!(intro$introducednumber %in% enrollednumber),3]="N"#
+names(intro)[3]="enrolled"#
+intro$enrolled <- as.factor(intro$enrolled)#
+intro$introduced = as.character(intro$introduced)#
+#
+intro=cbind(intro,df_total,df_party_total)#
+#
+Rpdf = readPDF(control = list(text = "-layout"))
+bills = Corpus(URISource(intro$introduced),#
+                  readerControl = list(reader = Rpdf))#
+#
+bills = transformations(bills)#
+corpus = bills[!is.na(bills)]#
+dtm = DocumentTermMatrix(corpus)#
+fivefreq <- findFreqTerms(dtm, 100)#
+fivefreq=fivefreq[!fivefreq=="bill"]#
+fivefreq=fivefreq[!fivefreq=="enact"]#
+fivefreq=fivefreq[!fivefreq=="<a7>"]#
+fivefreq=fivefreq[!fivefreq=="aaa"]#
+fivefreq=fivefreq[!fivefreq=="aaan"]#
+fivefreq=fivefreq[!fivefreq=="texa"]#
+fivefreq=fivefreq[!fivefreq=="state"]#
+fivefreq=fivefreq[!fivefreq=="relat"]#
+fivefreq=fivefreq[!fivefreq=="entitl"]#
+fivefreq=fivefreq[!fivefreq=="act"]#
+fivefreq=fivefreq[!fivefreq=="subtot"]#
+fivefreq=fivefreq[!fivefreq=="hbanoa"]#
+fivefreq=fivefreq[!fivefreq=="albb"]#
+fivefreq=fivefreq[!fivefreq=="proc"]#
+fivefreq=fivefreq[!fivefreq=="crim"]#
+##take out enact, bill#
+dtm <- DocumentTermMatrix(corpus, control=list(dictionary = fivefreq))
+m <- as.matrix(dtm)#
+v <- sort(colSums(m),decreasing=TRUE)#
+d <- data.frame(word = names(v),freq=v)#
+head(d, 10)#
+wordcloud(words = d$word, freq = d$freq, min.freq = 1,#
+          max.words=200, random.order=FALSE, rot.per=0.35, #
+          colors=brewer.pal(8, "Dark2"))
+convert_count <- function(x) {#
+  y <- ifelse(x > 0, 1,0)#
+  y <- factor(y, levels=c(0,1), labels=c("No", "Yes"))#
+  y#
+}#
+#
+set.seed(1)#
+smp_size <- floor(0.85 * nrow(intro))#
+train_ind <- sample(seq_len(nrow(intro)), size = smp_size)#
+intro.train <- intro[train_ind,]#
+intro.test <- intro[-train_ind,]#
+#
+dtm.e = dtm [intro$enrolled=="E",]#
+dtm.e = dtm[-1,]#
+#
+dtm.train <- dtm[train_ind,]#
+dtm.test <- dtm[-train_ind,]#
+#
+corpus.clean.train <- corpus[train_ind]#
+corpus.clean.test <- corpus[-train_ind]
+subject.train=intro.train[,4:ncol(intro.train)]#
+goodones=colSums(subject.train)>0
+subject.train=intro.train[,4:ncol(intro.train)]#
+goodones=colSums(subject.train)>0
+subject.train
+head(intro.train)
+head(subject.train)
+subject.train=intro.train[,4:(ncol(intro.train)-1)]#
+goodones=colSums(subject.train)>0
+goodones
+length(goodones)
+subject.train=subject.train[,goodones]#
+subject.test=intro.test[,4:ncol(intro.test)]#
+subject.test=subject.test[,goodones]
+trainNB.subject <- apply(subject.train, 2, convert_count)#
+testNB.subject <- apply(subject.test, 2, convert_count)#
+#
+trainNB <- apply(dtm.train, 2, convert_count)#
+testNB <- apply(dtm.test, 2, convert_count)
+trainNB=cbind(trainNB,trainNB.subject,intro.train$party_affliation)
+ncol(trainNB)
+testNB=cbind(testNB,testNB.subject,intro.test$party_affliation)#
+system.time( classifier <- naiveBayes(trainNB, intro.train$enrolled, laplace = 1) )#
+system.time( pred <- predict(classifier, newdata=testNB) )#
+system.time( predraw <- predict(classifier, newdata=testNB,type="raw") )
+table("Predictions"= pred,  "Actual" = intro.test$enrolled )#
+conf.mat <- confusionMatrix(pred, intro.test$enrolled)#
+conf.mat$overall['Accuracy']
+setwd("~/ftp.legis.state.tx.us/bills/85R/billtext/pdf/house_bills/HB00001_HB00099/")#
+tester_corpus=Corpus(URISource("HB00085I.pdf"),#
+                  readerControl = list(reader = Rpdf))#
+tester_corpus = transformations(tester_corpus)#
+tester_dtm <- DocumentTermMatrix(tester_corpus, control=list(dictionary = fivefreq))
+m <- as.matrix(tester_dtm)#
+v <- sort(colSums(m),decreasing=TRUE)#
+d <- data.frame(word = names(v),freq=v)#
+head(d, 10)#
+wordcloud(words = d$word, freq = d$freq, min.freq = 1,#
+          max.words=200, random.order=FALSE, rot.per=0.35, #
+          colors=brewer.pal(8, "Dark2"))
+data <- read_xml(paste0("~/Desktop/84 bills/ftp.legis.state.tx.us/bills/85R/billhistory/house_bills/HB00001_HB00099/HB 85.xml"))
+data
+subjects <- data %>% xml_find_all("//subject") %>%  xml_text()#
+coauthors <- data %>% xml_find_all("//coauthors") %>%  xml_text()#
+authors <- data %>% xml_find_all("//authors") %>%  xml_text()#
+authors = strsplit(authors," | ",fixed=T)#
+coauthors = strsplit(coauthors," | ",fixed=T)#
+authors=as.data.frame(authors)#
+coauthors=as.data.frame(coauthors)#
+names(authors) = "names"#
+names(coauthors) = "names"#
+bill_info=list("HB 4",authors,coauthors,subjects)
+xtest=match(subjects_list[,1],bill_info[[4]])#
+xtest[is.na(xtest)]=0#
+xtest[xtest>0]=1
+subjects=as.data.frame(t(xtest))#
+names(subjects)=as.character(subjects_list[,1])#
+names=bill_info[[2]][,1]#
+names=as.data.frame(names)#
+names=t(names)#
+x=strsplit(names,", ")#
+party=all_legislators[grep(paste0(as.character(x[1]),"$"),all_legislators$name),3]
+party
+subjects_1=apply(subjects,2,convert_count)#
+testerNB <- apply(tester_dtm, 2, convert_count)
+testerNB=as.character(testerNB)#
+subjects_1=as.character(subjects_1)#
+final=c(testerNB,subjects,as.character(party))
+length(final)
+ncol(trainNB)
+subjects_1
+tester_dtm
+2526-1956
+subjects
+subjects[goodones]
+subjects=subjects[goodones]
+length(subjects)
+1956+569
+subjects_1=apply(subjects,2,convert_count)
+testerNB <- apply(tester_dtm, 2, convert_count)#
+#
+testerNB=as.character(testerNB)#
+subjects_1=as.character(subjects_1)#
+final=c(testerNB,subjects_1,as.character(party))
+length(final)
+ncol(trainNB)
+final=as.data.frame(t(final))
+final
+names(classifier$tables)
+names(final)=names(classifier$tables)
+final
+system.time( pred_test <- predict(classifier, newdata=final) )
+system.time( pred_test_raw <- predict(classifier, newdata=final,type="raw") )
+pred_test
+pred_test_raw
+classifier
+classifier$apriori
+names(classifier)
+classifier$tables
+names(classifier)
+classifier$levels
+classifier$call
+classifier$apriori
+classifier
+head(classifier)
+tester_corpus=Corpus(URISource("HB00004I.pdf"),#
+                  readerControl = list(reader = Rpdf))#
+tester_corpus = transformations(tester_corpus)#
+tester_dtm <- DocumentTermMatrix(tester_corpus, control=list(dictionary = fivefreq))#
+m <- as.matrix(tester_dtm)#
+v <- sort(colSums(m),decreasing=TRUE)#
+d <- data.frame(word = names(v),freq=v)#
+head(d, 10)#
+wordcloud(words = d$word, freq = d$freq, min.freq = 1,#
+          max.words=200, random.order=FALSE, rot.per=0.35, #
+          colors=brewer.pal(8, "Dark2"))#
+data <- read_xml(paste0("~/Desktop/84 bills/ftp.legis.state.tx.us/bills/85R/billhistory/house_bills/HB00001_HB00099/HB 4.xml"))#
+subjects <- data %>% xml_find_all("//subject") %>%  xml_text()#
+coauthors <- data %>% xml_find_all("//coauthors") %>%  xml_text()#
+authors <- data %>% xml_find_all("//authors") %>%  xml_text()#
+authors = strsplit(authors," | ",fixed=T)#
+coauthors = strsplit(coauthors," | ",fixed=T)#
+authors=as.data.frame(authors)#
+coauthors=as.data.frame(coauthors)#
+names(authors) = "names"#
+names(coauthors) = "names"#
+bill_info=list("HB 4",authors,coauthors,subjects)#
+xtest=match(subjects_list[,1],bill_info[[4]])#
+xtest[is.na(xtest)]=0#
+xtest[xtest>0]=1#
+subjects=as.data.frame(t(xtest))#
+names(subjects)=as.character(subjects_list[,1])#
+names=bill_info[[2]][,1]#
+names=as.data.frame(names)#
+names=t(names)#
+x=strsplit(names,", ")#
+party=all_legislators[grep(paste0(as.character(x[1]),"$"),all_legislators$name),3]#
+#
+subjects=subjects[goodones]#
+subjects_1=apply(subjects,2,convert_count)#
+testerNB <- apply(tester_dtm, 2, convert_count)#
+#
+testerNB=as.character(testerNB)#
+subjects_1=as.character(subjects_1)#
+final=c(testerNB,subjects_1,as.character(party))#
+final=as.data.frame(t(final))#
+ names(final)=names(classifier$tables)#
+#
+system.time( pred_test <- predict(classifier, newdata=final) )#
+system.time( pred_test_raw <- predict(classifier, newdata=final,type="raw") )
+pred_test
+pred_test_raw
+tester_corpus=Corpus(URISource("HB00001I.pdf"),#
+                  readerControl = list(reader = Rpdf))#
+tester_corpus = transformations(tester_corpus)#
+tester_dtm <- DocumentTermMatrix(tester_corpus, control=list(dictionary = fivefreq))#
+m <- as.matrix(tester_dtm)#
+v <- sort(colSums(m),decreasing=TRUE)#
+d <- data.frame(word = names(v),freq=v)#
+head(d, 10)#
+wordcloud(words = d$word, freq = d$freq, min.freq = 1,#
+          max.words=200, random.order=FALSE, rot.per=0.35, #
+          colors=brewer.pal(8, "Dark2"))#
+data <- read_xml(paste0("~/Desktop/84 bills/ftp.legis.state.tx.us/bills/85R/billhistory/house_bills/HB00001_HB00099/HB 1.xml"))#
+subjects <- data %>% xml_find_all("//subject") %>%  xml_text()#
+coauthors <- data %>% xml_find_all("//coauthors") %>%  xml_text()#
+authors <- data %>% xml_find_all("//authors") %>%  xml_text()#
+authors = strsplit(authors," | ",fixed=T)#
+coauthors = strsplit(coauthors," | ",fixed=T)#
+authors=as.data.frame(authors)#
+coauthors=as.data.frame(coauthors)#
+names(authors) = "names"#
+names(coauthors) = "names"#
+bill_info=list("HB 4",authors,coauthors,subjects)#
+xtest=match(subjects_list[,1],bill_info[[4]])#
+xtest[is.na(xtest)]=0#
+xtest[xtest>0]=1#
+subjects=as.data.frame(t(xtest))#
+names(subjects)=as.character(subjects_list[,1])#
+names=bill_info[[2]][,1]#
+names=as.data.frame(names)#
+names=t(names)#
+x=strsplit(names,", ")#
+party=all_legislators[grep(paste0(as.character(x[1]),"$"),all_legislators$name),3]#
+#
+subjects=subjects[goodones]#
+subjects_1=apply(subjects,2,convert_count)#
+testerNB <- apply(tester_dtm, 2, convert_count)#
+#
+testerNB=as.character(testerNB)#
+subjects_1=as.character(subjects_1)#
+final=c(testerNB,subjects_1,as.character(party))#
+final=as.data.frame(t(final))#
+ names(final)=names(classifier$tables)#
+#
+system.time( pred_test <- predict(classifier, newdata=final) )#
+system.time( pred_test_raw <- predict(classifier, newdata=final,type="raw") )
+pred_test_raw
+pred_test
+final
+xxx=cbind(final,trainNB)
+head(xxx)
+xxx=rbind(final,trainNB)
+head(xxx)
+final
+classifier$tables$aaadopt
+final$aaadopt
+trainNB$aaadopt[1]
+trainNB$aaadopt
+trainNB[,1]
+final_1=as.matrix(final_1)
+final_1=as.matrix(final)
+final_1
+system.time( pred_test <- predict(classifier, newdata=final_1) )#
+system.time( pred_test_raw <- predict(classifier, newdata=final_1,type="raw") )
+pred_test_raw
+classifier
+subjects
+subjects==1
+subjects[subjects==1]
+subjects[subjects==1,]
+subjects[,subjects==1]
+subjects==1
+subjects[subjects==1]
+subjects[,subjects==1]
+subjects[subjects==1,]
+subjects==1
+subjects <- data %>% xml_find_all("//subject") %>%  xml_text()
+subjects
+tester_corpus=Corpus(URISource("HB00009I.pdf"),#
+                  readerControl = list(reader = Rpdf))#
+tester_corpus = transformations(tester_corpus)#
+tester_dtm <- DocumentTermMatrix(tester_corpus, control=list(dictionary = fivefreq))#
+m <- as.matrix(tester_dtm)#
+v <- sort(colSums(m),decreasing=TRUE)#
+d <- data.frame(word = names(v),freq=v)#
+head(d, 10)#
+wordcloud(words = d$word, freq = d$freq, min.freq = 1,#
+          max.words=200, random.order=FALSE, rot.per=0.35, #
+          colors=brewer.pal(8, "Dark2"))#
+data <- read_xml(paste0("~/Desktop/84 bills/ftp.legis.state.tx.us/bills/85R/billhistory/house_bills/HB00001_HB00099/HB 9.xml"))#
+subjects <- data %>% xml_find_all("//subject") %>%  xml_text()#
+coauthors <- data %>% xml_find_all("//coauthors") %>%  xml_text()#
+authors <- data %>% xml_find_all("//authors") %>%  xml_text()#
+authors = strsplit(authors," | ",fixed=T)#
+coauthors = strsplit(coauthors," | ",fixed=T)#
+authors=as.data.frame(authors)#
+coauthors=as.data.frame(coauthors)#
+names(authors) = "names"#
+names(coauthors) = "names"#
+bill_info=list("HB 4",authors,coauthors,subjects)#
+xtest=match(subjects_list[,1],bill_info[[4]])#
+xtest[is.na(xtest)]=0#
+xtest[xtest>0]=1#
+subjects=as.data.frame(t(xtest))#
+names(subjects)=as.character(subjects_list[,1])#
+names=bill_info[[2]][,1]#
+names=as.data.frame(names)#
+names=t(names)#
+x=strsplit(names,", ")#
+party=all_legislators[grep(paste0(as.character(x[1]),"$"),all_legislators$name),3]#
+#
+subjects=subjects[goodones]#
+subjects_1=apply(subjects,2,convert_count)#
+testerNB <- apply(tester_dtm, 2, convert_count)#
+#
+testerNB=as.character(testerNB)#
+subjects_1=as.character(subjects_1)#
+final=c(testerNB,subjects_1,as.character(party))#
+final=as.data.frame(t(final))#
+names(final)=names(classifier$tables)#
+final_1=as.matrix(final)#
+system.time( pred_test <- predict(classifier, newdata=final_1) )#
+system.time( pred_test_raw <- predict(classifier, newdata=final_1,type="raw") )
+pred_test_raw
+tester_corpus=Corpus(URISource("HB00010I.pdf"),#
+                  readerControl = list(reader = Rpdf))#
+tester_corpus = transformations(tester_corpus)#
+tester_dtm <- DocumentTermMatrix(tester_corpus, control=list(dictionary = fivefreq))#
+m <- as.matrix(tester_dtm)#
+v <- sort(colSums(m),decreasing=TRUE)#
+d <- data.frame(word = names(v),freq=v)#
+head(d, 10)#
+wordcloud(words = d$word, freq = d$freq, min.freq = 1,#
+          max.words=200, random.order=FALSE, rot.per=0.35, #
+          colors=brewer.pal(8, "Dark2"))#
+data <- read_xml(paste0("~/Desktop/84 bills/ftp.legis.state.tx.us/bills/85R/billhistory/house_bills/HB00001_HB00099/HB 10.xml"))#
+subjects <- data %>% xml_find_all("//subject") %>%  xml_text()#
+coauthors <- data %>% xml_find_all("//coauthors") %>%  xml_text()#
+authors <- data %>% xml_find_all("//authors") %>%  xml_text()#
+authors = strsplit(authors," | ",fixed=T)#
+coauthors = strsplit(coauthors," | ",fixed=T)#
+authors=as.data.frame(authors)#
+coauthors=as.data.frame(coauthors)#
+names(authors) = "names"#
+names(coauthors) = "names"#
+bill_info=list("HB 4",authors,coauthors,subjects)#
+xtest=match(subjects_list[,1],bill_info[[4]])#
+xtest[is.na(xtest)]=0#
+xtest[xtest>0]=1#
+subjects=as.data.frame(t(xtest))#
+names(subjects)=as.character(subjects_list[,1])#
+names=bill_info[[2]][,1]#
+names=as.data.frame(names)#
+names=t(names)#
+x=strsplit(names,", ")#
+party=all_legislators[grep(paste0(as.character(x[1]),"$"),all_legislators$name),3]#
+#
+subjects=subjects[goodones]#
+subjects_1=apply(subjects,2,convert_count)#
+testerNB <- apply(tester_dtm, 2, convert_count)#
+#
+testerNB=as.character(testerNB)#
+subjects_1=as.character(subjects_1)#
+final=c(testerNB,subjects_1,as.character(party))#
+final=as.data.frame(t(final))#
+names(final)=names(classifier$tables)#
+final_1=as.matrix(final)#
+system.time( pred_test <- predict(classifier, newdata=final_1) )#
+system.time( pred_test_raw <- predict(classifier, newdata=final_1,type="raw") )
+pred_test_raw
+subjects <- data %>% xml_find_all("//subject") %>%  xml_text()
+subjects
+tester_corpus=Corpus(URISource("HB00010I.pdf"),#
+                  readerControl = list(reader = Rpdf))#
+tester_corpus = transformations(tester_corpus)#
+tester_dtm <- DocumentTermMatrix(tester_corpus, control=list(dictionary = fivefreq))#
+m <- as.matrix(tester_dtm)#
+v <- sort(colSums(m),decreasing=TRUE)#
+d <- data.frame(word = names(v),freq=v)#
+head(d, 10)#
+wordcloud(words = d$word, freq = d$freq, min.freq = 1,#
+          max.words=200, random.order=FALSE, rot.per=0.35, #
+          colors=brewer.pal(8, "Dark2"))#
+data <- read_xml(paste0("~/Desktop/84 bills/ftp.legis.state.tx.us/bills/85R/billhistory/house_bills/HB00001_HB00099/HB 10.xml"))#
+subjects <- data %>% xml_find_all("//subject") %>%  xml_text()#
+coauthors <- data %>% xml_find_all("//coauthors") %>%  xml_text()#
+authors <- data %>% xml_find_all("//authors") %>%  xml_text()#
+authors = strsplit(authors," | ",fixed=T)#
+coauthors = strsplit(coauthors," | ",fixed=T)#
+authors=as.data.frame(authors)#
+coauthors=as.data.frame(coauthors)#
+names(authors) = "names"#
+names(coauthors) = "names"#
+bill_info=list("HB 4",authors,coauthors,subjects)#
+xtest=match(subjects_list[,1],bill_info[[4]])#
+xtest[is.na(xtest)]=0#
+xtest[xtest>0]=1#
+subjects=as.data.frame(t(xtest))#
+names(subjects)=as.character(subjects_list[,1])#
+names=bill_info[[2]][,1]#
+names=as.data.frame(names)#
+names=t(names)#
+x=strsplit(names,", ")#
+party=all_legislators[grep(paste0(as.character(x[1]),"$"),all_legislators$name),3]#
+#
+subjects=subjects[goodones]#
+subjects_1=apply(subjects,2,convert_count)#
+testerNB <- apply(tester_dtm, 2, convert_count)#
+#
+testerNB=as.character(testerNB)#
+subjects_1=as.character(subjects_1)#
+final=c(testerNB,subjects_1,as.character(party))#
+final=as.data.frame(t(final))#
+names(final)=names(classifier$tables)#
+final_1=as.matrix(final)#
+system.time( pred_test <- predict(classifier, newdata=final_1) )#
+system.time( pred_test_raw <- predict(classifier, newdata=final_1,type="raw") )
+pred_test_raw
+subjects
+subjects <- data %>% xml_find_all("//subject") %>%  xml_text()
+subjects
+rowSums(final_1)
+data <- read_xml(paste0("~/Desktop/84 bills/ftp.legis.state.tx.us/bills/85R/billhistory/house_bills/HB00001_HB00099/HB 10.xml"))#
+subjects <- data %>% xml_find_all("//subject") %>%  xml_text()#
+coauthors <- data %>% xml_find_all("//coauthors") %>%  xml_text()#
+authors <- data %>% xml_find_all("//authors") %>%  xml_text()#
+authors = strsplit(authors," | ",fixed=T)#
+coauthors = strsplit(coauthors," | ",fixed=T)#
+authors=as.data.frame(authors)#
+coauthors=as.data.frame(coauthors)#
+names(authors) = "names"#
+names(coauthors) = "names"#
+bill_info=list("HB 4",authors,coauthors,subjects)#
+xtest=match(subjects_list[,1],bill_info[[4]])#
+xtest[is.na(xtest)]=0#
+xtest[xtest>0]=1#
+subjects=as.data.frame(t(xtest))#
+names(subjects)=as.character(subjects_list[,1])#
+names=bill_info[[2]][,1]#
+names=as.data.frame(names)#
+names=t(names)#
+x=strsplit(names,", ")#
+party=all_legislators[grep(paste0(as.character(x[1]),"$"),all_legislators$name),3]#
+#
+subjects=subjects[goodones]#
+subjects_1=apply(subjects,2,convert_count)
+rowSums(subjects)
+rowSums(tester_dtm)
+tester_dtm
+as.matrix(tester_dtm)
+rowSums(as.matrix(tester_dtm))
+rowSums(ifelse(as.matrix(tester_dtm) > 0, 1,0))
