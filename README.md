@@ -11,7 +11,10 @@ Link to Web App : <a href ="https://velaraptor.shinyapps.io/tx_lege_house_analys
 <br> You can search for any bill from the House for the 85th legislature. Just input HB 7 and click <b>Search Bill</b> and you will get information on this bill. 
 <hr>
 <img src="https://raw.github.com/velaraptor/onefourty/master/screeshots/housebill.png")>
+<br> You will see the probabilities based on the corpus, subjects, and other variables for each bill. The big blue dot is the current bill you are looking at. The graph to the right shows you all the bills with the same subjects as the current search bill and the counts for each subject. 
 <hr>
 <img src="https://raw.github.com/velaraptor/onefourty/master/screeshots/wordcloud.png")>
+<br> You can also see the pdf file of the introduced bill, and a wordcloud of the most frequent words for the bill. 
 <hr>
 <img src="https://raw.github.com/velaraptor/onefourty/master/screeshots/houseprob.png")>
+<br>This is the same graph as above but is color coded to party affliation. 
