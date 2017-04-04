@@ -18,14 +18,16 @@ list_names[,1]=as.character(list_names[,1])
 probs=do.call(cbind.data.frame, lapply(final_list,function(x){x[[9]]}))
 ui <- fluidPage(theme = shinytheme("readable"),
 	    navbarPage(title=HTML("OneFourty"), id="nav",windowTitle="OneFourty",
-	    	tabPanel("Bill Analysis",
+	    	tabPanel("House Bill Analysis",
 	    		div(class="outer",
         				tags$head(
         					tags$link(
-        						rel = "icon", type = "image/svg", href = "https://upload.wikimedia.org/wikipedia/commons/3/35/Texas_flag_map.svg"))),
+        						rel = "icon", type = "image/png", href = "favicon.png"))
+        				),
 
 	    		h4(img(src="https://upload.wikimedia.org/wikipedia/commons/3/35/Texas_flag_map.svg",height="50px"),"85th Lege House Bill Analysis"),
-	    		textInput("bill","Enter Bill Number AS HB 1"),
+	    		helpText("Make sure to capitalize 'HB' in search box"),
+	    		textInput("bill","For example: Enter Bill Number AS HB 1"),
 	    		submitButton(text="Search Bill"),
 	    		htmlOutput("text2"),
 	    		 fluidRow(
@@ -34,10 +36,18 @@ ui <- fluidPage(theme = shinytheme("readable"),
 	    		 	),
 
 	    		 hr(),
+	    		 h3("Bill PDF & Wordcloud"),
  	    		fluidRow(
  	    			column(6,htmlOutput('pdfviewer')),
  	    			column(6, plotOutput("plot",height="600px",width="500px"))
- 	    			)
-			)
+ 	    			),
+ 	    		hr(),
+ 	    		h3("House Bills Probability by Party Affiliation"),
+ 	    		plotlyOutput("plot3"),
+ 	    		hr(),
+ 	    		h6("Probability model created by using data from previous 84th legislative session. This data is only a representation of the model and should not be taken literally."),
+ 	    		h6("Questions/Recommendations? Email me @" ,a(href="mailto:info@christophvel.com","info@christophvel.com"))
+			),
+			tabPanel("Senate Bill Analysis",h2("In the works..."))
 	    )
 )

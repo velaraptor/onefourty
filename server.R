@@ -16,6 +16,8 @@ load("final_list_subjects_dtm.RData")
 list_names=do.call(rbind.data.frame, lapply(final_list,function(x){x[[11]]}))
 list_names[,1]=as.character(list_names[,1])
 probs=do.call(cbind.data.frame, lapply(final_list,function(x){x[[9]]}))
+party=do.call(rbind.data.frame, lapply(final_list,function(x){x[[7]]}))
+
 
 server <- function(input, output) {
  observe({
@@ -41,7 +43,7 @@ server <- function(input, output) {
 						br(),
 						paste0("Main Author Party: ", good[[7]]),
 						br()
-					),h5(paste0("Probable Action: ",good[[8]]))
+					),"<font color=\"009900\">",h5(paste0("Probable Action: ",good[[8]])),"</font"
 				)
 				)
 				
@@ -72,6 +74,11 @@ server <- function(input, output) {
 			overallplot=ggplot(,aes(text=paste0(list_names[,1],"<br>Probability of Passing: ",t(probs)[,1],"<br>Probability of NOT Passing: ", t(probs)[,2] ),x=t(probs)[,1],y=t(probs)[,2])) +xlim(0,1)+ylim(0,1)+geom_point(colour="#d3d3d3",alpha=1/10)+xlab("Probability of Passing House")+ylab("Probability of Not Passing House") +
   				theme_minimal() + theme(legend.position="none")+geom_point(colour="#0080ff",aes(text=paste0(good[[11]],"<br>Probability of Passing: ",good[[9]][1],"<br>Probability of NOT Passing: ", good[[9]][2]),x=good[[9]][1],y=good[[9]][2],size=10))
   			ggplotly(overallplot,tooltip="text")	%>% config(displayModeBar = F)
+			})
+		output$plot3=renderPlotly({
+			overallplot2=ggplot(,aes(text=paste0(list_names[,1],"<br>Probability of Passing: ",t(probs)[,1],"<br>Probability of NOT Passing: ", t(probs)[,2] ),colour=party[,1],x=t(probs)[,1],y=t(probs)[,2])) +xlim(0,1)+ylim(0,1)+geom_point(alpha=1/5)+xlab("Probability of Passing House")+ylab("Probability of Not Passing House") +
+  				theme_minimal() +scale_color_fivethirtyeight(party[,1],name="Party")
+  			ggplotly(overallplot2,tooltip="text")	%>% config(displayModeBar = F)
 			})
 		m <- as.matrix(index_dtm)
 		v <- sort(colSums(m),decreasing=TRUE)
