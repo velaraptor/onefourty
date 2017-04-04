@@ -3,7 +3,12 @@
 <hr>
 Link to Web App : <a href ="https://velaraptor.shinyapps.io/tx_lege_house_analysis/">OneFourty</a>
 <hr>
+## Features
+<hr>
 <img src="https://raw.github.com/velaraptor/onefourty/master/screeshots/searchbox.png")>
+<hr>
 <img src="https://raw.github.com/velaraptor/onefourty/master/screeshots/housebill.png")>
+<hr>
 <img src="https://raw.github.com/velaraptor/onefourty/master/screeshots/wordcloud.png")>
+<hr>
 <img src="https://raw.github.com/velaraptor/onefourty/master/screeshots/houseprob.png")>
