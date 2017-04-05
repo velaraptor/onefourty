@@ -18,7 +18,7 @@ library(DT,quietly = TRUE)
 load("final_list_subjects_dtm.RData")
 load("senate.RData")
 
-##cosine function
+##cosine function that gets max numbers
 ##=========================
 whichpart <- function(x, n=30) {
   nx <- length(x)
@@ -60,6 +60,7 @@ server <- function(input, output,session) {
 
 	observe({
  		index_bill_name = input$bill
+ 		##check if bill text input is in right format
  		if(length(grep("^SB [0-9]+$|^HB [0-9]+$",index_bill_name))==1){
 	 		withProgress(message = 'Getting Bill Info!', value = 0,{
 	 		if((index_bill_name)==""){
@@ -68,7 +69,7 @@ server <- function(input, output,session) {
 	 			output$n=reactive({
 	 			return("TRUE")
 	 			})
-
+	 			##put respected senate and house objects into general objects
 	 			if(length(grep("HB",index_bill_name))==1){
 		 			x_dtm=dtm_tfxidf
 		 			y=party
@@ -87,7 +88,6 @@ server <- function(input, output,session) {
 		 			zzz=subject.tester_s
 
 	 			}
- 		##if SB HB then function, then run function dtm_tfxidf party probs list_names
 			output$header=renderUI({
 				HTML(paste(h3("Bill PDF & Wordcloud")))
 				})
@@ -101,6 +101,7 @@ server <- function(input, output,session) {
 			index=which(sapply(v, FUN=function(X) index_bill_name %in% X))
 			good=v[[index]]
 			index_dtm=zz[index,]
+			##get bill information
 			output$text2=renderUI({
 				HTML(
 					paste(
@@ -122,6 +123,7 @@ server <- function(input, output,session) {
 					
 				})
 			incProgress(.25, detail = paste("Almost Done!"))
+			##check if colsum of subjects only has one object, if not do normal colsums
 			if(length(zzz[,zzz[index,]==1])==4291 | length(zzz[,zzz[index,]==1])==2260){
 				xx=sum(zzz[,zzz[index,]==1])
 				xx=as.data.frame(xx)
@@ -141,20 +143,24 @@ server <- function(input, output,session) {
 					numberofsubjects=ggplot(xx, aes(x =factor(names), y = xx,fill="red",text=paste0("Count:",xx))) + geom_bar(stat = "identity")+theme_minimal()+xlab("Subjects")+ylab("Number of Bills")+ theme(legend.position="none",axis.text.x = element_text(size=6,angle=5,hjust=.5,vjust=.5))
 
 				}
+			##render plot of all subjects to respective bill and overall counts for those subjects	
 			output$subjectplot=renderPlotly({
 				ggplotly(numberofsubjects,tooltip="text") %>% config(displayModeBar = F)
 				})
+			##render plot of all chamber probabilities and show searched bill	
 			output$plot2=renderPlotly({
-				overallplot=ggplot(,aes(text=paste0(w[,1],"<br>Probability of Passing: ",t(z)[,1],"<br>Probability of NOT Passing: ", t(z)[,2] ),x=t(z)[,1],y=t(z)[,2])) +xlim(0,1)+ylim(0,1)+geom_point(colour="#d3d3d3",alpha=1/10)+xlab("Probability of Passing House")+ylab("Probability of Not Passing House") +
+				overallplot=ggplot(,aes(text=paste0(w[,1],"<br>Probability of Passing: ",t(z)[,1],"<br>Probability of NOT Passing: ", t(z)[,2] ),x=t(z)[,1],y=t(z)[,2])) +xlim(0,1)+ylim(0,1)+geom_point(colour="#d3d3d3",alpha=1/10)+xlab("Probability of Passing Chamber")+ylab("Probability of Not Passing Chamber") +
 						theme_minimal() + theme(legend.position="none")+geom_point(colour="#0080ff",aes(text=paste0(good[[11]],"<br>Probability of Passing: ",good[[9]][1],"<br>Probability of NOT Passing: ", good[[9]][2]),x=good[[9]][1],y=good[[9]][2],size=10))
 					ggplotly(overallplot,tooltip="text") %>% config(displayModeBar = F)
 				})
 			incProgress(.50, detail = paste("Almost Done!"))
+			##render plot of chamber probabilities with factor colour as party affliation
 			output$plot3=renderPlotly({
-				overallplot2=ggplot(,aes(text=paste0(w[,1],"<br>Probability of Passing: ",t(z)[,1],"<br>Probability of NOT Passing: ", t(z)[,2] ),colour=y[,1],x=t(z)[,1],y=t(z)[,2])) +xlim(0,1)+ylim(0,1)+geom_point(alpha=1/5)+xlab("Probability of Passing House")+ylab("Probability of Not Passing House") +
+				overallplot2=ggplot(,aes(text=paste0(w[,1],"<br>Probability of Passing: ",t(z)[,1],"<br>Probability of NOT Passing: ", t(z)[,2] ),colour=y[,1],x=t(z)[,1],y=t(z)[,2])) +xlim(0,1)+ylim(0,1)+geom_point(alpha=1/5)+xlab("Probability of Passing Chamber")+ylab("Probability of Not Passing Chamber") +
 						theme_minimal() +scale_color_fivethirtyeight(y[,1],name="Party")
 					ggplotly(overallplot2,tooltip="text") %>% config(displayModeBar = F)
 				})
+			##change document term matrix to create wordcloud
 			m <- as.matrix(index_dtm)
 			vv <- sort(colSums(m),decreasing=TRUE)
 			d <- data.frame(word = names(vv),freq=vv)
@@ -164,17 +170,20 @@ server <- function(input, output,session) {
 			 output$pdfviewer <- renderText({
 							return(paste('<iframe style="height:600px; width:100%" src="', good[[10]], '"></iframe>', sep = ""))
 					})
+			##get cosine similairty of bill text to whole corpus
 			yes=matrix()
 			for(j in 1:nrow(x_dtm)){
 				xx2=crossprod(x_dtm[index,],x_dtm[j,])/sqrt(crossprod(x_dtm[index,]) * crossprod(x_dtm[j,]))
 				yes=rbind(yes,xx2)
 			}
 			incProgress(.75, detail = paste("Almost Done!"))
+			##get max 10 docs and get index of those files
 			indices=whichpart(yes,n=12)
 			similarity_score=yes[indices]
 			indices=indices-1
 			similar_doc_indices=indices[!indices==index]
 			similarity_score=similarity_score[!indices==index]
+			##get relevant info from list for cosine sim bills
 			sb=data.frame()
 			for(i in 1:length(similar_doc_indices)){
 				k=similar_doc_indices[i]
@@ -191,6 +200,7 @@ server <- function(input, output,session) {
 			sb$"Similarity Score"=as.numeric(sb$"Similarity Score")
 			sb$"Similarity Score"=round(sb$"Similarity Score",2)
 			sb=sb[order(sb$"Similarity Score",decreasing=T),]
+			##put cosine sim bills in datatable
 			output$mytable = renderDataTable({
 				sb
 						},options = list(dom = 'ft',initComplete = JS(
@@ -202,6 +212,7 @@ server <- function(input, output,session) {
 	 	})
 
 	 	}else{
+	 		##if bill text input is not in correct format
 	 		if((index_bill_name)==""){
 
 	 			}else{

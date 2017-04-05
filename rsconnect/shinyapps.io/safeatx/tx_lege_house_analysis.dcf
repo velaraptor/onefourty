@@ -3,9 +3,8 @@ title: onefourty
 account: safeatx
 server: shinyapps.io
 appId: 169570
-bundleId: 778552
+bundleId: 778600
 url: https://velaraptor.shinyapps.io/tx_lege_house_analysis/
-when: 1491428649.3441
+when: 1491431095.92682
 asMultiple: FALSE
 asStatic: FALSE
-ignoredFiles: .Rapp.history|README.md|screeshots/housebill.png|screeshots/houseprob.png|screeshots/searchbox.png|screeshots/wordcloud.png|www/.DS_Store
